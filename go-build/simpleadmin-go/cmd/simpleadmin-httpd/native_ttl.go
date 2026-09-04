@@ -4,11 +4,11 @@
 package main
 
 import (
+	"errors"
 	"fmt"
 	"log"
 	"os"
 	"os/exec"
-	"path/filepath"
 	"strconv"
 	"strings"
 )
@@ -42,7 +42,8 @@ func runTTLCommand(args []string) {
 			fmt.Println(err)
 			os.Exit(1)
 		}
-		printLines(applyNativeTTL(value, false))
+		lines, _ := applyNativeTTL(value, false)
+		printLines(lines)
 	case "off", "stop":
 		printLines(setNativeTTL(0))
 	case "status":
@@ -63,77 +64,117 @@ func printLines(lines []string) {
 func applySavedTTLAtStartup() {
 	value, err := readTTLValue()
 	if err != nil {
-		if err := writeTTLValue(0); err != nil {
-			log.Printf("初始化 TTL 配置失败: %v", err)
+		if errors.Is(err, os.ErrNotExist) {
+			if err := writeTTLValue(0); err != nil {
+				log.Printf("初始化 TTL 配置失败: %v", err)
+			}
+		} else {
+			log.Printf("读取 TTL 配置失败,保留现有文件: %v", err)
 		}
 		return
 	}
 	if value <= 0 {
 		return
 	}
-	for _, line := range applyNativeTTL(value, false) {
+	lines, _ := applyNativeTTL(value, false)
+	for _, line := range lines {
 		log.Printf("TTL: %s", line)
 	}
 }
 
 func setNativeTTL(value int) []string {
-	logs := applyNativeTTL(value, true)
-	if err := writeTTLValue(value); err != nil {
-		logs = append(logs, "failed to write ttlvalue: "+err.Error())
-	}
+	logs, _ := setNativeTTLWithStatus(value)
 	return logs
 }
 
-func applyNativeTTL(value int, persistLog bool) []string {
+// setNativeTTLWithStatus 与 setNativeTTL 相同,但额外返回规则是否成功应用
+// 并持久化,供 HTTP 接口如实上报成败(旧路径恒返回 200,前端无法感知
+// 应用失败)。
+func setNativeTTLWithStatus(value int) ([]string, bool) {
+	logs, applied := applyNativeTTL(value, true)
+	if !applied {
+		return logs, false
+	}
+	if err := writeTTLValue(value); err != nil {
+		logs = append(logs, "failed to write ttlvalue: "+err.Error())
+		return logs, false
+	}
+	return logs, true
+}
+
+func applyNativeTTL(value int, persistLog bool) ([]string, bool) {
 	logs := []string{"Applying TTL rules with Go native handler"}
-	logs = append(logs, removeNativeTTLRules()...)
+	removeLogs, removedAll := removeNativeTTLRules()
+	logs = append(logs, removeLogs...)
+	if !removedAll {
+		// 清理失败时内核可能残留托管规则:禁用路径若持久化 0 会出现
+		// "状态未激活但规则仍在"的不一致;按"失败不持久化"语义返回失败。
+		if value <= 0 {
+			logs = append(logs, "TTL disable failed: managed rules not fully removed, ttlvalue not persisted")
+		} else {
+			logs = append(logs, "TTL rules not applied, ttlvalue not persisted")
+		}
+		return logs, false
+	}
 
 	if value <= 0 {
 		logs = append(logs, "TTL disabled")
-		return logs
+		return logs, true
 	}
 
 	logs = append(logs, fmt.Sprintf("Enabling TTL with value: %d", value))
+	applied := true
 	for _, spec := range ttlRuleSpecs {
 		args := []string{"-t", "mangle", "-I", "POSTROUTING", "-o", "rmnet+", "-j", spec.target, spec.setFlag, strconv.Itoa(value)}
 		if out, err := exec.Command(spec.command, args...).CombinedOutput(); err != nil {
 			logs = append(logs, fmt.Sprintf("%s add failed: %v: %s", spec.command, err, strings.TrimSpace(string(out))))
+			applied = false
 			continue
 		}
 		logs = append(logs, fmt.Sprintf("%s rule added", spec.command))
 	}
 
+	if !applied {
+		logs = append(logs, "TTL rules not applied, ttlvalue not persisted")
+		return logs, false
+	}
 	if persistLog {
 		logs = append(logs, "TTL value saved")
 	}
-	return logs
+	return logs, true
 }
 
-func removeNativeTTLRules() []string {
+// removeNativeTTLRules 清理内核中托管的 TTL/HL 规则,返回日志与是否全部成功。
+// 任一列表/删除命令失败都视为清理失败(内核可能残留规则),
+// 由调用方据此决定是否持久化新状态。
+func removeNativeTTLRules() ([]string, bool) {
 	var logs []string
+	ok := true
 	for _, spec := range ttlRuleSpecs {
 		out, err := exec.Command(spec.command, "-t", "mangle", "-S", "POSTROUTING").CombinedOutput()
 		if err != nil {
 			logs = append(logs, fmt.Sprintf("%s list failed: %v: %s", spec.command, err, strings.TrimSpace(string(out))))
+			ok = false
 			continue
 		}
 
 		removed := 0
 		for _, line := range strings.Split(string(out), "\n") {
-			deleteArgs, ok := managedTTLDeleteArgs(line, spec.target, spec.setFlag)
-			if !ok {
+			deleteArgs, matched := managedTTLDeleteArgs(line, spec.target, spec.setFlag)
+			if !matched {
 				continue
 			}
 			cmdArgs := append([]string{"-t", "mangle"}, deleteArgs...)
 			if delOut, err := exec.Command(spec.command, cmdArgs...).CombinedOutput(); err != nil {
 				logs = append(logs, fmt.Sprintf("%s delete failed: %v: %s", spec.command, err, strings.TrimSpace(string(delOut))))
+				ok = false
 				continue
 			}
 			removed++
 		}
 		logs = append(logs, fmt.Sprintf("%s removed %d managed TTL rule(s)", spec.command, removed))
 	}
-	return logs
+	return logs, ok
 }
 
 func managedTTLDeleteArgs(ruleLine, target, setFlag string) ([]string, bool) {
@@ -170,6 +211,9 @@ func readTTLValue() (int, error) {
 	for _, path := range []string{runtimeTTLValueFile, legacyTTLValueFile} {
 		data, err := os.ReadFile(path)
 		if err != nil {
+			if !errors.Is(err, os.ErrNotExist) {
+				return 0, err
+			}
 			continue
 		}
 		value, err := strconv.Atoi(stripNonDigits(string(data)))
@@ -181,12 +225,12 @@ func readTTLValue() (int, error) {
 	return 0, os.ErrNotExist
 }
 
+// writeTTLValue 原子写入 TTL 状态文件:该文件驱动开机自愈重新应用规则,
+// 直接覆写遇掉电可能留下截断内容,重启后按非法值拒绝恢复规则,
+// 用户保存过的 TTL 设置静默失效(与其他状态文件一致,见 §原子写约定)。
 func writeTTLValue(value int) error {
 	if value < 0 || value > 255 {
 		return fmt.Errorf("invalid TTL value: %d", value)
 	}
-	if err := os.MkdirAll(filepath.Dir(runtimeTTLValueFile), 0755); err != nil {
-		return err
-	}
-	return os.WriteFile(runtimeTTLValueFile, []byte(strconv.Itoa(value)+"\n"), 0644)
+	return atomicWriteFile(runtimeTTLValueFile, []byte(strconv.Itoa(value)+"\n"), 0644)
 }

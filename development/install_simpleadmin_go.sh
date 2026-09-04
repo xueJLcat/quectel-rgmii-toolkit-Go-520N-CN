@@ -191,6 +191,13 @@ EOF
     chmod 0644 "$AT_DEVICES_FILE"
 }
 
+cleanup_legacy_frontend_sources() {
+    log "正在清理旧版上传遗留的前端构建源码（frontend / node_modules）"
+    rm -rf "$SIMPLEADMIN_SRC/frontend" 2>/dev/null || true
+    rm -rf "$SIMPLEADMIN_DIR/frontend" 2>/dev/null || true
+    rm -rf "$SIMPLEADMIN_DIR/node_modules" 2>/dev/null || true
+}
+
 cleanup_legacy_at_bridges() {
     ps 2>/dev/null | awk '
         $0 ~ "cat /dev/ttyIN" { print $1 }
@@ -747,6 +754,7 @@ main() {
     reset_install_runtime_markers
     remount_rw
     stop_existing_simpleadmin_runtime
+    cleanup_legacy_frontend_sources
     install_simpleadmin_files
     install_at_device_config
     install_ttl_state

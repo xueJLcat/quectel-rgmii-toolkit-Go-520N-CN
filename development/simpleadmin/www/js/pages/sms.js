@@ -1,21 +1,25 @@
 function fetchSMS() {
   return {
     isLoading: false,
+    smsLoadFailed: false,
+    smsPending: false,
+    selectAllChecked: false,
     messages: [],
     senders: [],
     dates: [],
     selectedMessages: [],
     phoneNumber: '',
     messageToSend: '',
+    isSending: false,
     messageIndices: [],
     serviceCenters: [],
     activeMessageIndex: null,
     smsDetailGlobalHandlersBound: false,
-    smsAutoRefreshTimer: null,
-    smsAutoRefreshInFlight: false,
+    smsAutoRefreshPoll: null,
     smsAutoRefreshIntervalMs: 5000,
     smsListSignature: '',
     smsIndexSignature: '',
+    smsMetaSignature: '',
     smsPendingData: null,
     smsPendingIndexSignature: '',
     smsPendingListSignature: '',
@@ -23,6 +27,26 @@ function fetchSMS() {
     smsPendingFirstSeenAt: 0,
     smsStablePollsRequired: 2,
     smsPendingMaxWaitMs: 15000,
+    smsPollFailCount: 0,
+
+    watch: {
+      selectedMessages: {
+        handler() {
+          this.syncSelectAll();
+        },
+        deep: true
+      }
+    },
+
+    t(key) {
+      return SimpleAdmin.Lang ? SimpleAdmin.Lang.t(key) : key;
+    },
+
+    notify(type, text) {
+      if (SimpleAdmin.UI && typeof SimpleAdmin.UI.notify === 'function') {
+        SimpleAdmin.UI.notify(type, text);
+      }
+    },
 
     clearData() {
       this.messages = [];
@@ -32,10 +56,12 @@ function fetchSMS() {
       this.messageIndices = [];
       this.smsListSignature = '';
       this.smsIndexSignature = '';
+      this.smsMetaSignature = '';
+      this.smsPending = false;
       this.resetSMSPendingRefresh();
       this.activeMessageIndex = null;
       this.setMessageDetailOpenState(false);
-      this.syncSelectAllCheckbox();
+      this.syncSelectAll();
     },
 
     requestSMS(options = {}) {
@@ -45,6 +71,8 @@ function fetchSMS() {
       if (!silent) this.isLoading = true;
       return SimpleAdmin.Api.smsData(params)
         .then((data) => {
+          if (this.applySMSPendingOrError(data)) return;
+          this.smsLoadFailed = false;
           this.applySMSData(data, {
             keepDetail: options.keepDetail === true,
             keepSelection: options.keepSelection === true
@@ -55,7 +83,28 @@ function fetchSMS() {
         });
     },
 
+    // sms_data 应答的 pending/error 状态统一处理:开机/模块重启保护期后端
+    // 返回 pending(解析为空列表),读取完全失败返回 error。两者都不得用
+    // 空列表覆盖既有收件箱——pending 保留加载提示等待后台就绪(自动轮询
+    // 会补取),error 走失败横幅+手动重试。返回 true 表示调用方中止应用。
+    applySMSPendingOrError(data) {
+      if (data && data.pending === true) {
+        this.smsPending = true;
+        return true;
+      }
+      this.smsPending = false;
+      if (data && data.error) {
+        this.smsLoadFailed = true;
+        return true;
+      }
+      return false;
+    },
+
     applySMSData(data, options = {}) {
+      // 后台轮询(fetchStableSMSList)也经由此方法应用数据,
+      // 成功载入时复位失败/等待标志,避免初次加载失败被轮询救回后横幅残留。
+      this.smsLoadFailed = false;
+      this.smsPending = false;
       const activeKey = options.keepDetail === true ? this.currentMessageKey(this.activeMessageIndex) : '';
       const selectedKeys = options.keepSelection === true
         ? this.selectedMessages.map((index) => this.currentMessageKey(index)).filter(Boolean)
@@ -68,31 +117,33 @@ function fetchSMS() {
       this.messageIndices = [];
       this.serviceCenters = data.serviceCenters || [];
       (data.messages || []).forEach((msg) => {
-        const date = msg.date ? this.parseCustomDate(String(msg.date).replace(/\+\d{2}$/, '')) : new Date(NaN);
+        const date = msg.date ? SimpleAdmin.Time.parseCustomDate(msg.date) : null;
         this.pushSMSMessage(
           msg.sender || '',
-          Number.isNaN(date.getTime()) ? new Date() : date,
+          date,
           msg.text || '',
           msg.indices || [],
-          Array.isArray(msg.textLines) ? msg.textLines : []
+          Array.isArray(msg.textLines) ? msg.textLines : [],
+          msg.storage
         );
       });
 
       this.smsListSignature = this.makeSMSListSignature(data);
       this.smsIndexSignature = this.makeSMSIndexSignature(data);
+      this.smsMetaSignature = this.makeSMSMetaSignature(data);
       this.resetSMSPendingRefresh();
       this.restoreSelectionByKeys(selectedKeys);
       this.restoreActiveMessageByKey(activeKey);
-      this.syncSelectAllCheckbox();
+      this.syncSelectAll();
     },
 
-    pushSMSMessage(sender, date, text, indices, textLines = []) {
+    pushSMSMessage(sender, date, text, indices, textLines = [], storage = 'ME') {
       const normalizedText = this.normalizeMessageText(text);
       const lines = this.normalizeMessageLines(normalizedText, textLines);
       this.messageIndices.push(indices);
       this.senders.push(sender);
-      this.dates.push(this.formatDate(date));
-      this.messages.push({ text: normalizedText, lines, sender, date, indices });
+      this.dates.push(date ? this.formatDate(date) : '-');
+      this.messages.push({ text: normalizedText, lines, sender, date, indices, storage: storage === 'SM' ? 'SM' : 'ME' });
     },
 
     normalizeMessageText(text) {
@@ -125,6 +176,7 @@ function fetchSMS() {
 
     makeSMSListSignature(data) {
       return JSON.stringify((data.messages || []).map((msg) => [
+        msg.storage === 'SM' ? 'SM' : 'ME',
         msg.sender || '',
         msg.date || '',
         msg.text || '',
@@ -137,12 +189,13 @@ function fetchSMS() {
       const indices = [];
       (data.messages || []).forEach((msg) => {
         if (!Array.isArray(msg.indices)) return;
+        const storage = msg.storage === 'SM' ? 'SM' : 'ME';
         msg.indices.forEach((index) => {
           const n = Number(index);
-          if (Number.isFinite(n)) indices.push(n);
+          if (Number.isFinite(n)) indices.push(storage + ':' + n);
         });
       });
-      indices.sort((a, b) => a - b);
+      indices.sort();
       return indices.join(',');
     },
 
@@ -198,11 +251,8 @@ function fetchSMS() {
       this.setMessageDetailOpenState(false);
     },
 
-    syncSelectAllCheckbox() {
-      const selectAllCheckbox = document.getElementById('selectAllCheckbox');
-      if (!selectAllCheckbox) return;
-      const hasMessages = this.messages.length > 0;
-      selectAllCheckbox.checked = hasMessages && this.selectedMessages.length === this.messages.length;
+    syncSelectAll() {
+      this.selectAllChecked = this.selectedMessages.length > 0 && this.selectedMessages.length === this.messages.length;
     },
 
     bindMessageDetailGlobalHandlers() {
@@ -230,38 +280,69 @@ function fetchSMS() {
 
     startSMSAutoRefresh() {
       if (!this.isSMSPageActive()) return;
-      if (this.smsAutoRefreshTimer) return;
-      this.smsAutoRefreshTimer = setInterval(() => {
-        this.autoRefreshSMS();
-      }, this.smsAutoRefreshIntervalMs);
+      if (!this.smsAutoRefreshPoll && SimpleAdmin.Poll) {
+        this.smsAutoRefreshPoll = SimpleAdmin.Poll.create({
+          tick: () => this.pollSMSMeta(),
+          interval: this.smsAutoRefreshIntervalMs,
+          immediate: false
+        });
+      }
+      if (this.smsAutoRefreshPoll) this.smsAutoRefreshPoll.start();
     },
 
     stopSMSAutoRefresh() {
-      if (this.smsAutoRefreshTimer) {
-        clearInterval(this.smsAutoRefreshTimer);
-        this.smsAutoRefreshTimer = null;
-      }
-      this.smsAutoRefreshInFlight = false;
+      if (this.smsAutoRefreshPoll) this.smsAutoRefreshPoll.stop();
       this.resetSMSPendingRefresh();
     },
 
-    autoRefreshSMS() {
+    pollSMSMeta() {
       if (!this.isSMSPageActive()) {
         this.stopSMSAutoRefresh();
-        return;
+        return null;
       }
-      if (this.smsAutoRefreshInFlight || this.isLoading) return;
-      this.smsAutoRefreshInFlight = true;
-      SimpleAdmin.Api.smsData({ action: 'list_meta', force: '1' })
+      if (this.isLoading) return null;
+      return SimpleAdmin.Api.smsData({ action: 'list_meta' })
         .then((data) => {
+          this.smsPollFailCount = 0;
           if (!this.isSMSPageActive()) return null;
           return this.handlePolledSMSMeta(data);
         })
-        .catch(() => {
-          // Keep the timer alive; the next interval can retry.
+        .catch((err) => {
+          this.smsPollFailCount += 1;
+          console.warn(`短信轮询失败（连续 ${this.smsPollFailCount} 次）`, err);
+          throw err;
+        });
+    },
+
+    refreshInbox() {
+      if (this.isLoading) return Promise.resolve();
+      return SimpleAdmin.Api.smsData({ action: 'list_meta' })
+        .then((data) => {
+          this.smsPollFailCount = 0;
+          if (!this.isSMSPageActive()) return null;
+          if (data && data.pending === true) {
+            this.smsPending = true;
+            return null;
+          }
+          this.smsPending = false;
+          if (data && data.error) {
+            this.smsLoadFailed = true;
+            return null;
+          }
+          this.smsLoadFailed = false;
+          const indexSignature = this.makeSMSIndexSignature(data);
+          const metaSignature = this.makeSMSMetaSignature(data);
+          if (indexSignature === this.smsIndexSignature && metaSignature === this.smsMetaSignature) {
+            this.resetSMSPendingRefresh();
+            return null;
+          }
+          return this.fetchStableSMSList('');
         })
-        .finally(() => {
-          this.smsAutoRefreshInFlight = false;
+        .catch((err) => {
+          this.smsPollFailCount += 1;
+          console.warn('短信刷新失败', err);
+          this.smsLoadFailed = true;
+          this.notify('danger', this.t('短信读取失败'));
         });
     },
 
@@ -277,13 +358,17 @@ function fetchSMS() {
     },
 
     handlePolledSMSMeta(data) {
+      // 保护期 pending/读取失败 error 的 meta 不参与变更检测:空列表签名会
+      // 误判为"收件箱变化"触发全量重拉并清空界面;静默跳过本轮,
+      // 下一轮轮询自动补取。
+      if (data && (data.pending === true || data.error)) return null;
       const indexSignature = this.makeSMSIndexSignature(data);
-      if (indexSignature === this.smsIndexSignature) {
+      const metaSignature = this.makeSMSMetaSignature(data);
+      if (indexSignature === this.smsIndexSignature && metaSignature === this.smsMetaSignature) {
         this.resetSMSPendingRefresh();
         return null;
       }
 
-      const metaSignature = this.makeSMSMetaSignature(data);
       const now = Date.now();
       if (indexSignature === this.smsPendingIndexSignature && metaSignature === this.smsPendingListSignature) {
         this.smsPendingStableCount += 1;
@@ -306,21 +391,29 @@ function fetchSMS() {
     fetchStableSMSList(expectedIndexSignature) {
       return SimpleAdmin.Api.smsData({ action: 'list', force: '1' })
         .then((data) => {
+          this.smsPollFailCount = 0;
           if (!this.isSMSPageActive()) return;
+          if (this.applySMSPendingOrError(data)) return;
           const indexSignature = this.makeSMSIndexSignature(data);
-          if (indexSignature === this.smsIndexSignature) {
+          const metaSignature = this.makeSMSMetaSignature(data);
+          if (indexSignature === this.smsIndexSignature && metaSignature === this.smsMetaSignature) {
             this.resetSMSPendingRefresh();
             return;
           }
           if (expectedIndexSignature && indexSignature !== expectedIndexSignature) {
             this.smsPendingData = data;
             this.smsPendingIndexSignature = indexSignature;
-            this.smsPendingListSignature = this.makeSMSMetaSignature(data);
+            this.smsPendingListSignature = metaSignature;
             this.smsPendingStableCount = 1;
             this.smsPendingFirstSeenAt = Date.now();
             return;
           }
           this.applySMSData(data, { keepDetail: true, keepSelection: true });
+        })
+        .catch((err) => {
+          this.smsPollFailCount += 1;
+          console.warn(`短信轮询失败（连续 ${this.smsPollFailCount} 次）`, err);
+          throw err;
         });
     },
 
@@ -335,7 +428,7 @@ function fetchSMS() {
       this.setMessageDetailOpenState(true);
       if (typeof this.$nextTick === 'function') {
         this.$nextTick(() => {
-          const closeButton = document.querySelector('.sa-sms-detail-modal .btn-close');
+          const closeButton = document.querySelector('.sa-sms-detail-modal .sa-modal-close');
           if (closeButton) closeButton.focus({ preventScroll: true });
         });
       }
@@ -346,22 +439,17 @@ function fetchSMS() {
       this.setMessageDetailOpenState(false);
     },
 
-    parseCustomDate(dateStr) {
-      const [datePart, timePart] = String(dateStr || '').split(',');
-      if (!datePart || !timePart) return new Date(NaN);
-      const [day, month, year] = datePart.split('/').map((part) => parseInt(part, 10));
-      const [hour, minute, second] = timePart.split(':').map((part) => parseInt(part, 10));
-      return new Date(Date.UTC(2000 + year, month - 1, day, hour, minute, second));
-    },
-
     formatDate(date) {
-      const year = date.getUTCFullYear() - 2000;
+      // 输出与后端一致的 YY/MM/DD(年在前)顺序,保证解析↔显示精确往返;
+      // 旧实现输出 DD/MM/YY,与 parseCustomDate 的错位解构互相抵消才显得正常,
+      // 解析修正后必须同步为年在前,否则日期会再次被调换显示。
+      const year = (date.getUTCFullYear() - 2000).toString().padStart(2, '0');
       const month = (date.getUTCMonth() + 1).toString().padStart(2, '0');
       const day = date.getUTCDate().toString().padStart(2, '0');
       const hour = date.getUTCHours().toString().padStart(2, '0');
       const minute = date.getUTCMinutes().toString().padStart(2, '0');
       const second = date.getUTCSeconds().toString().padStart(2, '0');
-      return `${day}/${month}/${year},${hour}:${minute}:${second}`;
+      return `${year}/${month}/${day},${hour}:${minute}:${second}`;
     },
 
     deleteSelectedSMS() {
@@ -375,15 +463,28 @@ function fetchSMS() {
         return;
       }
 
-      const isAllSelected = this.selectedMessages.length === this.messages.length;
-      if (isAllSelected) {
-        this.deleteAllSMS();
+      if (this.selectedMessages.length === this.messages.length) {
+        this.confirmClearAllSMS();
         return;
       }
 
+      SimpleAdmin.UI.confirm({
+        title: '删除短信',
+        message: '确定删除选中的短信？',
+        danger: true,
+        confirmText: '删除',
+        onConfirm: () => this.performDeleteSelectedSMS()
+      });
+    },
+
+    performDeleteSelectedSMS() {
       const indicesToDelete = [];
       this.selectedMessages.forEach((index) => {
-        indicesToDelete.push(...this.messages[index].indices);
+        const msg = this.messages[index] || {};
+        const storage = msg.storage === 'SM' ? 'SM' : 'ME';
+        (msg.indices || []).forEach((idx) => {
+          indicesToDelete.push(storage + ':' + idx);
+        });
       });
 
       if (indicesToDelete.length === 0) {
@@ -392,71 +493,109 @@ function fetchSMS() {
       }
 
       SimpleAdmin.Api.smsData({ action: 'delete_indices', indices: indicesToDelete.join(',') })
-        .finally(() => {
+        .then((data) => {
+          if (data && data.ok === false) {
+            this.notify('danger', this.t('删除失败') + '：' + (data.error || this.t('未知错误')));
+            return;
+          }
           this.selectedMessages = [];
-          this.requestSMS({ force: true });
+          this.syncSelectAll();
+          // 删除成功后刷新收件箱;刷新失败单独提示(删除本身已成功),
+          // 不能吞掉 Promise 拒绝形成未处理 rejection。
+          return this.requestSMS({ force: true }).catch(() => {
+            this.notify('danger', this.t('短信读取失败'));
+          });
+        })
+        .catch(() => {
+          this.notify('danger', '删除失败');
         });
+    },
+
+    confirmClearAllSMS() {
+      SimpleAdmin.UI.confirm({
+        title: '清空短信',
+        message: '确定删除全部短信？',
+        danger: true,
+        confirmText: '清空',
+        onConfirm: () => this.deleteAllSMS()
+      });
     },
 
     deleteAllSMS() {
       SimpleAdmin.Api.smsData({ action: 'delete_all' })
-        .finally(() => {
-          this.init();
+        .then((data) => {
+          if (data && data.ok === false) {
+            this.notify('danger', this.t('删除失败') + '：' + (data.error || this.t('未知错误')));
+            return;
+          }
+          this.clearData();
+          return this.requestSMS({ force: true });
+        })
+        .catch(() => {
+          this.notify('danger', '删除失败');
         });
     },
 
     async sendSMS() {
+      if (this.isSending) return;
       if (!this.phoneNumber || !this.messageToSend) {
-        this.showNotification('号码或内容不能为空', 'warning');
+        this.notify('warning', '号码或内容不能为空');
         return;
       }
 
+      this.isSending = true;
       try {
-        const simStatus = await SimpleAdmin.Api.smsData({ action: 'sim_status' });
-        if (!simStatus.inserted) {
-          this.showNotification('未检测到 SIM 卡', 'danger');
-          return;
-        }
-      } catch { }
+        try {
+          const simStatus = await SimpleAdmin.Api.smsData({ action: 'sim_status' });
+          if (!simStatus.inserted) {
+            this.notify('danger', '未检测到 SIM 卡');
+            return;
+          }
+        } catch { }
 
-      try {
-        const result = await SimpleAdmin.Api.smsData({
-          action: 'send',
-          number: this.phoneNumber,
-          message: this.messageToSend
-        });
-        if (result.ok) {
-          this.showNotification('短信发送成功！', 'success');
-          return;
+        try {
+          const result = await SimpleAdmin.Api.smsData({
+            action: 'send',
+            number: this.phoneNumber,
+            message: this.messageToSend
+          });
+          if (result.ok) {
+            this.notify('success', '短信发送成功！');
+            this.phoneNumber = '';
+            this.messageToSend = '';
+            this.requestSMS({ force: true });
+            return;
+          }
+          this.notify('danger', '短信发送失败：' + (result.error || this.t('未知错误')));
+        } catch (error) {
+          this.notify('danger', '短信发送失败：' + (error?.message || this.t('未知错误')));
         }
-        this.showNotification(`短信发送失败：${result.error || '未知错误'}`, 'danger');
-      } catch (error) {
-        this.showNotification(`短信发送失败：${error?.message || '网络错误'}`, 'danger');
+      } finally {
+        this.isSending = false;
       }
-    },
-
-    showNotification(message, type = 'info') {
-      const n = document.getElementById('notification');
-      const translated = SimpleAdmin.Lang ? SimpleAdmin.Lang.t(message) : message;
-      n.innerText = translated;
-      n.dataset.simpleadminI18nKey = message;
-      n.className = `alert alert-${type}`;
-      n.style.display = 'block';
-      setTimeout(() => { n.style.display = 'none'; }, 3000);
     },
 
     init() {
       this.bindMessageDetailGlobalHandlers();
       this.clearData();
       this.requestSMS({ force: true })
+        .catch((err) => {
+          console.error('短信加载失败', err);
+          this.smsLoadFailed = true;
+        })
         .finally(() => {
           this.startSMSAutoRefresh();
         });
     },
 
     toggleAll(event) {
-      this.selectedMessages = event.target.checked ? this.messages.map((_, index) => index) : [];
-      this.syncSelectAllCheckbox();
+      // 模板使用内联 @change="toggleAll()"，Vue 不会传入事件对象（未写 $event），
+      // 此处若依赖 event.target.checked 会抛 TypeError 导致全选永远失效。
+      // change 触发时 v-model 已更新 selectAllChecked，直接以它为准；
+      // 保留 event 形参以兼容可能的事件/无参数调用，但逻辑不依赖它。
+      const checked = (event && event.target) ? !!event.target.checked : this.selectAllChecked;
+      this.selectedMessages = checked ? this.messages.map((_, index) => index) : [];
+      this.syncSelectAll();
     }
   };
 }

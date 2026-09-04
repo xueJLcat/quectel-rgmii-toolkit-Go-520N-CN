@@ -1,49 +1,33 @@
 function simpleSettings() {
       return {
         isLoading: false,
-        showSuccess: false,
-        showError: false,
-        isClean: true,
-        showModal: false,
-        showImeiModal: false,
-        isRebooting: false,
-        atcmd: "",
-        fetchATCommand: "",
-        countdown: 0,
-        atCommandResponse: "",
-        ttldata: null,
-        ttlvalue: 0,
-        ttlStatus: false,
-        newTTL: null,
-        ipPassMode: "未指定",
-        ipPassStatus: false,
-        usbNetMode: "未指定",
-        currentUsbNetMode: "未知",
         imei: "-",
         newImei: "",
-        lanIpStart: "",  // 初始化 LAN IP 起始地址
-        lanIpEnd: "",    // 初始化 LAN IP 结束地址
-        lanGwIp: "",     // 初始化 网关 IP 地址
-        isSavingLANIP: false,
-        lanIpSaveSuccess: false,
-        lanIpSaveSuccessTimer: null,
-        DNSV6ProxyStatus: true,
-        DNSV4ProxyStatus: true,
-        dmzMode: "0",
-        dmzIP: "",
-        isRebooted: true,
         language: SimpleAdmin.Lang ? SimpleAdmin.Lang.getCurrentLanguage() : "zh-CN",
         isSavingLanguage: false,
-        languageSaveMessage: "",
+        themeDefault: "light",
+        isSavingTheme: false,
         currentPassword: "",
         newPassword: "",
         confirmPassword: "",
         isSavingPassword: false,
-        passwordSaveMessage: "",
-        rebootCountdownTimer: null,
+        showReloginButton: false,
+        systemStatusFailed: false,
+        ttldata: null,
+        ttlvalue: 0,
+        ttlStatus: null,
+        ttlFailed: false,
+        newTTL: null,
+        isSavingTTL: false,
 
         t(key) {
           return SimpleAdmin.Lang ? SimpleAdmin.Lang.t(key) : key;
+        },
+
+        notify(type, text) {
+          if (SimpleAdmin.UI && typeof SimpleAdmin.UI.notify === 'function') {
+            SimpleAdmin.UI.notify(type, text);
+          }
         },
 
         fetchLanguageSetting() {
@@ -54,44 +38,89 @@ function simpleSettings() {
           });
         },
 
-        resolveDmzMode(mode, ip) {
-          const currentMode = String(mode || '').trim();
-          const currentIp = String(ip || '').trim();
-          if (currentIp && currentIp !== '-') {
-            return '1';
-          }
-          return currentMode === '1' ? '1' : '0';
-        },
-
         saveLanguageSetting() {
           if (!SimpleAdmin.Lang) return;
           this.isSavingLanguage = true;
-          this.languageSaveMessage = "";
           SimpleAdmin.Lang.setLanguage(this.language, { save: true })
-            .then((language) => {
+            .then((result) => {
+              const language = result && result.language ? result.language : result;
               this.language = language;
-              this.languageSaveMessage = this.t("已保存");
-              setTimeout(() => {
-                this.languageSaveMessage = "";
-              }, 3000);
+              if (result && result.localOnly) {
+                this.notify('warning', '已本地生效，服务器保存失败');
+              } else {
+                this.notify('success', '已保存');
+              }
             })
             .catch((error) => {
               console.error("保存语言设置失败：", error);
-              this.languageSaveMessage = this.t("保存失败");
+              this.notify('danger', '保存失败');
             })
             .finally(() => {
               this.isSavingLanguage = false;
             });
         },
 
+        normalizeTheme(theme) {
+          return theme === 'dark' ? 'dark' : 'light';
+        },
+
+        fetchThemeSetting() {
+          if (!SimpleAdmin.Api || typeof SimpleAdmin.Api.getTheme !== 'function') return;
+          SimpleAdmin.Api.getTheme()
+            .then((res) => res.json())
+            .then((data) => {
+              const theme = data && data.theme;
+              if (theme === 'dark' || theme === 'light') {
+                this.themeDefault = theme;
+                return;
+              }
+              // 服务端无有效值时回退为当前浏览器正在使用的主题,避免显示假默认值
+              this.themeDefault = SimpleAdmin.UI && typeof SimpleAdmin.UI.getTheme === 'function'
+                ? SimpleAdmin.UI.getTheme()
+                : 'light';
+            })
+            .catch((error) => {
+              console.error("获取主题设置失败：", error);
+              this.themeDefault = SimpleAdmin.UI && typeof SimpleAdmin.UI.getTheme === 'function'
+                ? SimpleAdmin.UI.getTheme()
+                : 'light';
+            });
+        },
+
+        saveThemeSetting() {
+          const theme = this.normalizeTheme(this.themeDefault);
+          this.themeDefault = theme;
+          // 先本地生效(当前浏览器立即切换并记住),再保存为设备默认值
+          if (SimpleAdmin.UI && typeof SimpleAdmin.UI.setTheme === 'function') {
+            SimpleAdmin.UI.setTheme(theme, { persist: true });
+          }
+          if (!SimpleAdmin.Api || typeof SimpleAdmin.Api.setTheme !== 'function') return;
+          this.isSavingTheme = true;
+          SimpleAdmin.Api.setTheme(theme)
+            .then((res) => res.json())
+            .then((data) => {
+              if (!data || data.error) {
+                throw new Error((data && data.error) || 'theme save failed');
+              }
+              this.themeDefault = this.normalizeTheme(data.theme);
+              this.notify('success', '已保存');
+            })
+            .catch((error) => {
+              console.error("保存主题设置失败：", error);
+              this.notify('warning', '已本地生效，服务器保存失败');
+            })
+            .finally(() => {
+              this.isSavingTheme = false;
+            });
+        },
+
         changeLoginPassword() {
-          this.passwordSaveMessage = "";
           if (!this.currentPassword || !this.newPassword) {
-            this.passwordSaveMessage = this.t("请输入当前密码和新密码");
+            this.notify('warning', '请输入当前密码和新密码');
             return;
           }
           if (this.newPassword !== this.confirmPassword) {
-            this.passwordSaveMessage = this.t("两次输入的新密码不一致");
+            this.notify('warning', '两次输入的新密码不一致');
             return;
           }
 
@@ -109,6 +138,12 @@ function simpleSettings() {
                 if (error === "new password is empty") {
                   throw new Error("新密码不能为空");
                 }
+                if (error === "new password must not contain line breaks") {
+                  throw new Error("新密码不能包含换行符");
+                }
+                if (error === "new password is too long") {
+                  throw new Error("新密码过长");
+                }
                 if (error === "password confirmation mismatch") {
                   throw new Error("密码确认不一致");
                 }
@@ -117,228 +152,233 @@ function simpleSettings() {
               this.currentPassword = "";
               this.newPassword = "";
               this.confirmPassword = "";
-              this.passwordSaveMessage = this.t("密码已保存，请使用新密码重新登录。");
+              this.notify('success', '密码已保存，请使用新密码重新登录。');
+              this.showReloginButton = true;
             })
             .catch((error) => {
               console.error("保存登录密码失败：", error);
-              this.passwordSaveMessage = this.t(error.message || "密码保存失败");
+              this.notify('danger', error.message || '密码保存失败');
             })
             .finally(() => {
               this.isSavingPassword = false;
             });
         },
 
-        closeModal() {
-          this.showModal = false;
-        },
-
-        closeImeiModal() {
-          this.showImeiModal = false;
-        },
-
-        showRebootModal() {
-          this.showModal = true;
-        },
-
-        sendATCommand() {
-          if (!this.atcmd) {
-            this.atcmd = "ATI";
+        reloginNow() {
+          if (window.SimpleAdmin && SimpleAdmin.Logout && typeof SimpleAdmin.Logout.start === 'function') {
+            SimpleAdmin.Logout.start();
+          } else {
+            window.location.href = '/api/logout';
           }
-          this.isLoading = true;
-          // ★ 返回 fetch 的 Promise，这样外层可以 .then(...)
-          return SimpleAdmin.Api.settingsData({ action: 'manual_at', command: this.atcmd })
-            .then((data) => data.response || '')
-            .then((data) => {
-              this.atCommandResponse = data;
-              this.isLoading = false;
-              this.isClean = false;
-              //this.fetchCurrentSettings();
-              return data; // ★ 把结果再传下去，链式调用更方便
-            })
-            .catch((error) => {
-              console.error("错误: ", error);
-              this.showError = true;
-              this.isLoading = false;
-              throw error; // ★ 继续抛出，方便调用方捕获
-            });
-        },
-
-        clearResponses() {
-          this.atCommandResponse = "";
-          this.isClean = true;
-        },
-
-        startRebootCountdown(seconds = 40) {
-          if (this.rebootCountdownTimer) {
-            clearInterval(this.rebootCountdownTimer);
-          }
-          this.atCommandResponse = "";
-          this.showModal = false;
-          this.showImeiModal = false;
-          this.isRebooting = true;
-          this.countdown = seconds;
-          this.isRebooted = false;  // 重启标志位，表示设备尚未重启完成
-
-          // 进行倒计时
-          this.rebootCountdownTimer = setInterval(() => {
-            this.countdown--;
-            if (this.countdown <= 0) {
-              clearInterval(this.rebootCountdownTimer);
-              this.rebootCountdownTimer = null;
-              this.isRebooting = false;
-
-              // 给设备一些时间重启后再执行初始化
-              setTimeout(() => {
-                this.isRebooted = true;  // 设置标志为已重启
-                this.init();  // 重启后执行初始化（发送必要的 AT 命令）
-              }, 5000);  // 延迟 5 秒，以确保设备完全重启
-            }
-          }, 1000);
-        },
-
-        handleRebootNotice(data) {
-          if (!data || !(data.reboot || data.rebooting)) {
-            return false;
-          }
-          const seconds = Number(data.rebootCountdownSeconds) || 40;
-          this.startRebootCountdown(seconds);
-          return true;
         },
 
         rebootDevice() {
-          SimpleAdmin.Api.settingsData({ action: 'reboot' });
-          this.startRebootCountdown(40);
+          // AT命令重启:经 AT+CFUN=1,1 重启蜂窝模块,设备本身保持运行。
+          if (!SimpleAdmin.Reboot) return;
+          SimpleAdmin.Reboot.request({
+            title: 'AT命令重启',
+            message: '将通过 AT 指令（AT+CFUN=1,1）重启蜂窝模块，约需 40 秒恢复。继续吗?',
+            confirmText: '重启',
+            onDone: () => {
+              setTimeout(() => { this.init(); }, 5000);
+            }
+          });
         },
 
+        rebootSystem() {
+          // 设备重启:执行系统 reboot 命令,二次确认后触发。
+          if (!SimpleAdmin.UI) return;
+          SimpleAdmin.UI.confirm({
+            title: '设备重启',
+            message: '这将重启整台设备，期间管理界面不可用，约需 60 秒恢复。继续吗?',
+            danger: true,
+            confirmText: '重启设备',
+            onConfirm: () => this.startSystemReboot()
+          });
+        },
+
+        startSystemReboot() {
+          // 乐观倒计时:命令发出后设备随即开始停机,WS 中断属常态,
+          // 仅当后端明确返回失败(命令无法启动)时取消倒计时。
+          if (SimpleAdmin.Reboot) {
+            SimpleAdmin.Reboot.countdown(60, () => {
+              setTimeout(() => { this.init(); }, 5000);
+            }, '设备重启中…请稍候,请勿关闭页面');
+          }
+          SimpleAdmin.Api.systemData({ action: 'reboot_device' })
+            .then((data) => {
+              if (data && data.ok === false && data.error) {
+                if (SimpleAdmin.Reboot && typeof SimpleAdmin.Reboot.cancelCountdown === 'function') {
+                  SimpleAdmin.Reboot.cancelCountdown();
+                }
+                this.notify('danger', data.error);
+              }
+            })
+            .catch(() => { });
+        },
+
+        poweroffDevice() {
+          // 关机:执行系统 poweroff 命令,二次确认后触发。
+          if (!SimpleAdmin.UI) return;
+          SimpleAdmin.UI.confirm({
+            title: '关机',
+            message: '这将使设备断电关机，关机后设备无法自行恢复，必须手动通电开机。继续吗?',
+            danger: true,
+            confirmText: '关机',
+            onConfirm: () => this.startPoweroff()
+          });
+        },
+
+        startPoweroff() {
+          const showPoweroffNotice = () => {
+            const overlay = document.getElementById('sa-poweroff-overlay');
+            if (!overlay || !SimpleAdmin.UI || !SimpleAdmin.UI.modal) return;
+            if (!this._poweroffOverlayBound) {
+              this._poweroffOverlayBound = true;
+              const okBtn = document.getElementById('saPoweroffOk');
+              if (okBtn) okBtn.addEventListener('click', () => SimpleAdmin.UI.modal.close(overlay));
+            }
+            SimpleAdmin.UI.modal.open(overlay, { focus: document.getElementById('saPoweroffOk') });
+          };
+          const probeDeviceAlive = () => fetch('/login.html', { cache: 'no-store' })
+            .then(() => true)
+            .catch(() => false);
+          const confirmPoweroffByProbe = () => {
+            // 传输中断无法区分"设备正在断电"与"命令未送达":延时探测免会话的
+            // 登录页,设备仍可达说明命令未送达(只提示错误),不可达才判定已关机。
+            setTimeout(() => {
+              probeDeviceAlive().then((alive) => {
+                if (alive) {
+                  this.notify('danger', this.t('关机命令未送达，设备仍在运行，请重试'));
+                } else {
+                  showPoweroffNotice();
+                }
+              });
+            }, 6000);
+          };
+          const waitDevicePoweredOff = () => {
+            // 关机命令送达≠已断电:断电是异步过程,设备还会继续运行数秒。
+            // 轮询探测直到设备不可达再弹"已关机",避免设备仍在运行时误导用户;
+            // 超时仍未断电也照常提示(设备随后会完成断电)。
+            let attempts = 0;
+            const maxAttempts = 8;
+            const poll = () => {
+              probeDeviceAlive().then((alive) => {
+                if (!alive) {
+                  showPoweroffNotice();
+                  return;
+                }
+                attempts++;
+                if (attempts >= maxAttempts) {
+                  showPoweroffNotice();
+                  return;
+                }
+                setTimeout(poll, 2000);
+              });
+            };
+            setTimeout(poll, 2000);
+          };
+          SimpleAdmin.Api.systemData({ action: 'poweroff_device' })
+            .then((data) => {
+              if (data && data.ok === false) {
+                this.notify('danger', data.error || this.t('操作失败'));
+                return;
+              }
+              waitDevicePoweredOff();
+            })
+            .catch(() => {
+              confirmPoweroffByProbe();
+            });
+        },
 
         openImeiModal() {
           const val = (this.newImei || '').trim();
           if (!val) {
-            alert('没有提供新的 IMEI。');
+            this.notify('danger', '没有提供新的 IMEI。');
             return;
           }
           if (val.length !== 15 || !/^\d+$/.test(val)) {
-            alert('IMEI 无效');
+            this.notify('danger', 'IMEI 无效');
             return;
           }
           if (this.imei !== '-' && val === this.imei) {
-            alert('IMEI 与当前 IMEI 相同');
+            this.notify('danger', 'IMEI 与当前 IMEI 相同');
             return;
           }
-          this.showImeiModal = true;
+          SimpleAdmin.UI.confirm({
+            title: '这将修改 IMEI 并重启调制解调器。',
+            message: '继续？',
+            danger: true,
+            confirmText: '确认并重启',
+            onConfirm: () => this.updateIMEI()
+          });
         },
 
         updateIMEI() {
           const val = (this.newImei || '').trim();
-          this.showImeiModal = false;
           this.isLoading = true;
-          SimpleAdmin.Api.settingsData({ action: 'set_imei', imei: val })
+          this._imeiRebootFailed = false;
+          if (SimpleAdmin.Reboot) {
+            SimpleAdmin.Reboot.countdown(40, () => {
+              if (!this._imeiRebootFailed) this.init();
+            });
+          }
+          SimpleAdmin.Api.systemData({ action: 'set_imei', imei: val })
+            .then((data) => {
+              if (data && data.ok === false) {
+                this._imeiRebootFailed = true;
+                // 修改失败时取消重启倒计时;方法由 simpleadmin-reboot.js 提供,先做存在性判断
+                if (SimpleAdmin.Reboot && typeof SimpleAdmin.Reboot.cancelCountdown === 'function') {
+                  SimpleAdmin.Reboot.cancelCountdown();
+                }
+                this.notify('danger', data.error || this.t('操作失败'));
+              }
+            })
             .catch((error) => {
-              console.info('设置 IMEI 后设备重启或连接断开，继续保持重启倒计时：', error);
+              console.error('修改 IMEI 失败:', error);
+              // 传输层失败(会话过期/网络中断/超时)时命令并未送达设备,
+              // 必须取消乐观启动的重启倒计时,否则界面仍会等待 40s 并误触发 init()。
+              this._imeiRebootFailed = true;
+              if (SimpleAdmin.Reboot && typeof SimpleAdmin.Reboot.cancelCountdown === 'function') {
+                SimpleAdmin.Reboot.cancelCountdown();
+              }
+              this.notify('danger', this.t('操作失败'));
             })
             .finally(() => {
               this.isLoading = false;
             });
-          this.startRebootCountdown(40);
         },
 
-        resetATCommands() {
-          SimpleAdmin.Api.settingsData({ action: 'reset_at' });
-          this.atCommandResponse = "";
-          this.showRebootModal();
-        },
-
-        ipPassThroughEnable() {
-          if (this.ipPassMode != "未指定") {
-            SimpleAdmin.Api.settingsData({ action: 'ip_passthrough', enabled: '1', mode: this.ipPassMode });
-          } else {
-            console.error("未指定 IP 透传模式");
+        fetchSystemStatus(retry) {
+          const attempt = retry || 0;
+          if (attempt === 0) {
+            this._systemStatusSeq = (this._systemStatusSeq || 0) + 1;
+            if (this._systemStatusTimer) {
+              clearTimeout(this._systemStatusTimer);
+              this._systemStatusTimer = null;
+            }
           }
-        },
-
-        ipPassThroughDisable() {
-          this.showError = false;
-          this.atCommandResponse = this.t("正在禁用 IP 透传，网口会重启，请等待倒计时结束。");
-          this.startRebootCountdown(40);
-
-          SimpleAdmin.Api.settingsData({ action: 'ip_passthrough', enabled: '0' })
+          const seq = this._systemStatusSeq;
+          SimpleAdmin.Api.systemData({ action: 'status', force: '1' })
             .then((data) => {
-              if (data && data.response) {
-                this.atCommandResponse = data.response;
+              if (seq !== this._systemStatusSeq) return;
+              if (data && data.pending === true) {
+                if (attempt < 8) {
+                  this._systemStatusTimer = setTimeout(() => {
+                    this._systemStatusTimer = null;
+                    this.fetchSystemStatus(attempt + 1);
+                  }, 1500 * Math.min(attempt + 1, 4));
+                } else {
+                  this.systemStatusFailed = true;
+                }
+                return;
               }
-              if (!this.handleRebootNotice(data) && data && data.ok === false) {
-                this.showError = true;
+              if (data && data.error) {
+                // AT 读取失败:给出可见失败态与重试入口,不静默保留旧 IMEI。
+                this.systemStatusFailed = true;
+                return;
               }
-            })
-            .catch((error) => {
-              console.info("禁用 IP 透传期间网口/WebSocket 断开，继续保持重启倒计时：", error);
-              if (!this.isRebooting) {
-                this.startRebootCountdown(40);
-              }
-            });
-        },
-
-        onBoardDNSV6ProxyEnable() {
-          SimpleAdmin.Api.settingsData({ action: 'dns_proxy', family: '6', enabled: '1' }).then(() => {
-            this.fetchCurrentSettings();
-          });
-        },
-        onBoardDNSV4ProxyEnable() {
-          SimpleAdmin.Api.settingsData({ action: 'dns_proxy', family: '4', enabled: '1' }).then(() => {
-            this.fetchCurrentSettings();
-          });
-        },
-
-        onBoardDNSV6ProxyDisable() {
-          SimpleAdmin.Api.settingsData({ action: 'dns_proxy', family: '6', enabled: '0' }).then(() => {
-            this.fetchCurrentSettings();
-          });
-        },
-        onBoardDNSV4ProxyDisable() {
-          SimpleAdmin.Api.settingsData({ action: 'dns_proxy', family: '4', enabled: '0' }).then(() => {
-            this.fetchCurrentSettings();
-          });
-        },
-
-
-        async usbNetModeChanger() {
-          if (this.usbNetMode === "未指定") {
-            console.error("未指定 USB 网络模式");
-            return;
-          }
-
-          const map = { RMNET: 0, ECM: 1, MBIM: 2, RNDIS: 3 };
-          const code = map[this.usbNetMode];
-          if (code === undefined) {
-            console.warn("USB 网络模式无效");
-            return;
-          }
-
-          try {
-            await SimpleAdmin.Api.settingsData({ action: 'usbnet', mode: this.usbNetMode });  // 等待设置成功
-            // 成功后只弹出确认重启的模态框
-            this.showRebootModal();
-          } catch (e) {
-            console.error("设置 usbnet 失败：", e);
-          }
-        },
-
-        fetchCurrentSettings() {
-          if (!this.isRebooted) {
-            return;  // 如果设备还在重启，跳过
-          }
-          SimpleAdmin.Api.settingsData({ action: 'status' })
-            .then((data) => {
-              this.ipPassStatus = !!data.ipPassStatus;
-              this.DNSV6ProxyStatus = !!data.DNSV6ProxyStatus;
-              this.DNSV4ProxyStatus = !!data.DNSV4ProxyStatus;
-              this.currentUsbNetMode = data.currentUsbNetMode || '未知';
-              const currentDmzIp = String(data.dmzIP || '').trim();
-              this.dmzIP = currentDmzIp;
-              this.dmzMode = this.resolveDmzMode(data.dmzMode, currentDmzIp);
-              this.lanIpStart = data.lanIpStart || '';
-              this.lanIpEnd = data.lanIpEnd || '';
-              this.lanGwIp = data.lanGwIp || '';
+              this.systemStatusFailed = false;
               const oldImei = this.imei;
               const currentImei = (data.imei || '').trim();
               if (/^\d{14,17}$/.test(currentImei)) {
@@ -349,9 +389,16 @@ function simpleSettings() {
               }
             })
             .catch((error) => {
+              if (seq !== this._systemStatusSeq) return;
               console.error("错误: ", error);
-              this.showError = true;
+              this.systemStatusFailed = true;
+              this.notify('danger', this.t('错误:') + ' ' + ((error && error.message) || this.t('未知错误')));
             });
+        },
+
+        retrySystemStatus() {
+          this.systemStatusFailed = false;
+          this.fetchSystemStatus(0);
         },
 
         fetchTTL() {
@@ -360,120 +407,85 @@ function simpleSettings() {
               return res.json();
             })
             .then((data) => {
+              if (!data) throw new Error('empty TTL response');
               this.ttldata = data;
-              this.ttlStatus = this.ttldata.isEnabled;
-              this.ttlvalue = this.ttldata.ttl;
+              this.ttlStatus = !!data.isEnabled;
+              this.ttlvalue = data.ttl;
+              this.ttlFailed = false;
             })
             .catch((error) => {
-              console.error("Error fetching TTL status: ", error); // 日志：捕获错误
+              console.error("Error fetching TTL status: ", error);
+              this.ttlFailed = true;
             });
+        },
+
+        retryTTL() {
+          this.ttlFailed = false;
+          this.fetchTTL();
         },
 
         setTTL() {
-          const ttlValueWithoutLeadingZero = parseInt(this.newTTL, 10);
+          if (this.isSavingTTL) return;
+          // 严格数字校验:parseInt 会把 "0x10" 解析成 0(=禁用 TTL)、
+          // "12abc" 解析成 12,静默放行会造成与输入不符的生效值。
+          const rawTTL = String(this.newTTL === null || this.newTTL === undefined ? '' : this.newTTL).trim();
+          if (!/^\d{1,3}$/.test(rawTTL)) {
+            this.notify('danger', 'TTL 值必须是 0-255 的整数');
+            return;
+          }
+          const ttlValueWithoutLeadingZero = Number(rawTTL);
 
-          // 如果 ttlValueWithoutLeadingZero 是 null, 空字符串 "", 负值，或者大于 255，则退出
-          if (isNaN(ttlValueWithoutLeadingZero) || ttlValueWithoutLeadingZero < 0 || ttlValueWithoutLeadingZero > 255) {
-            return;  // 直接退出函数
+          if (ttlValueWithoutLeadingZero < 0 || ttlValueWithoutLeadingZero > 255) {
+            this.notify('danger', 'TTL 值必须是 0-255 的整数');
+            return;
           }
 
-          this.isLoading = true; // 设置 TTL 更新期间的加载状态
           const ttlval = ttlValueWithoutLeadingZero;
+          this.isSavingTTL = true;
 
           SimpleAdmin.Api.setTTL(ttlval)
             .then((res) => {
-              return res.text(); // 使用 res.text() 获取响应数据
+              return res.json().catch(() => ({}));
             })
             .then((data) => {
-              this.fetchTTL();  // 更新 TTL 状态
-              this.isLoading = false; // 将加载状态设置回 false
-            })
-            .catch((error) => {
-              console.error("Error setting TTL: ", error); // 日志：捕获错误
-              this.isLoading = false; // 确保在出现错误时正确处理加载状态
-            });
-        },
-
-        setDMZEnable() {
-          // 启用 DMZ，检查 IP 地址是否存在
-          if (this.dmzIP) {
-            SimpleAdmin.Api.settingsData({ action: 'dmz', enabled: '1', ip: this.dmzIP });
-            this.atCommandResponse = "";
-            this.showModal = false;
-            this.dmzMode = '1';  // 更新为启用状态
-          } else {
-            console.error("请输入有效的 IP 地址！");
-          }
-        },
-
-        setDMZDisable() {
-          // 禁用 DMZ
-          SimpleAdmin.Api.settingsData({ action: 'dmz', enabled: '0' });
-          this.dmzMode = '0';  // 更新为禁用状态
-          this.atCommandResponse = "";
-          this.showModal = false;
-        },
-        setLANIP() {
-          this.lanIpSaveSuccess = false;
-          if (this.lanIpSaveSuccessTimer) {
-            clearTimeout(this.lanIpSaveSuccessTimer);
-            this.lanIpSaveSuccessTimer = null;
-          }
-
-          // 检查网关 IP 地址和起始/结束 IP 地址的最后一位是否已填写
-          if (!this.lanGwIp || !this.lanIpStart || !this.lanIpEnd) {
-            console.error("请输入有效的网关 IP 地址和起始、结束 IP 地址！");
-            return;
-          }
-
-          // 提取网关 IP 地址的前三位
-          const gwIpParts = this.lanGwIp.split('.');
-
-          // 确保网关 IP 地址格式正确，并且有四个部分
-          if (gwIpParts.length !== 4) {
-            console.error("网关 IP 地址格式无效！");
-            return;
-          }
-
-          // 使用网关 IP 地址的前三位与用户输入的最后一位拼接成完整的起始和结束 IP
-          const startIp = `${gwIpParts[0]}.${gwIpParts[1]}.${gwIpParts[2]}.${this.lanIpStart}`;
-          const endIp = `${gwIpParts[0]}.${gwIpParts[1]}.${gwIpParts[2]}.${this.lanIpEnd}`;
-
-          this.isSavingLANIP = true;
-          this.atCommandResponse = "";
-          this.showModal = false;
-
-          return SimpleAdmin.Api.settingsData({ action: 'lanip', start: startIp, end: endIp, gateway: this.lanGwIp })
-            .then((data) => {
-              if (data && data.ok === false) {
-                throw new Error(data.error || "LAN IP 设置失败");
+              // 后端对非法取值/规则应用失败会返回 ok:false,
+              // 不能一律显示"已保存"误导用户。
+              if (!data || data.ok === false) {
+                throw new Error((data && data.error) || '');
               }
-              this.lanIpSaveSuccess = true;
-              this.lanIpSaveSuccessTimer = setTimeout(() => {
-                this.lanIpSaveSuccess = false;
-                this.lanIpSaveSuccessTimer = null;
-              }, 3000);
+              this.notify('success', '已保存');
+              this.fetchTTL();
             })
             .catch((error) => {
-              console.error("LAN IP 设置失败：", error);
+              console.error("Error setting TTL: ", error);
+              this.notify('danger', '数据更新失败');
+              this.fetchTTL();
             })
             .finally(() => {
-              this.isSavingLANIP = false;
+              this.isSavingTTL = false;
             });
         },
 
         init() {
-          if (!this.isRebooted) {
-            return;  // 如果设备正在重启，跳过
+          if (!this._pageReturnBound && SimpleAdmin.Poll) {
+            this._pageReturnBound = true;
+            SimpleAdmin.Poll.onPageReturn('settings', () => {
+              if (!this._pageChangeReady) return;
+              this.fetchSystemStatus();
+              this.fetchTTL();
+            });
           }
 
-          this.fetchLanguageSetting();  // 获取界面语言设置
-          this.fetchCurrentSettings();  // 发送 AT 命令获取当前设置
-          this.fetchTTL();  // 获取 TTL 状态
+          this.fetchLanguageSetting();
+          this.fetchThemeSetting();
+          this.fetchSystemStatus();
+          this.fetchTTL();
+
+          setTimeout(() => { this._pageChangeReady = true; }, 0);
         },
       };
     }
-  
+
     if (window.SimpleAdminSpaMode) {
       (window.SimpleAdmin.Pages = window.SimpleAdmin.Pages || {}).settings = simpleSettings;
     } else {

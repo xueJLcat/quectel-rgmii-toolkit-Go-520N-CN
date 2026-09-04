@@ -32,9 +32,23 @@ goto cleanup
 
 call :log 信息 "正在上传 SimpleAdmin Go 安装包..."
 "%ADB%" shell "mount -o remount,rw / >/dev/null 2>&1 || true"
-"%ADB%" shell rm -rf /tmp/development
-"%ADB%" push "%DEV_DIR%" /tmp/development
-if not errorlevel 1 goto push_ok
+"%ADB%" shell "rm -rf /tmp/development && mkdir -p /tmp/development/simpleadmin"
+"%ADB%" push "%DEV_DIR%\install_simpleadmin_go.sh" /tmp/development/
+if errorlevel 1 goto push_fail
+"%ADB%" push "%DEV_DIR%\uninstall_simpleadmin_go.sh" /tmp/development/
+if errorlevel 1 goto push_fail
+"%ADB%" push "%DEV_DIR%\simpleadmin\simpleadmin-httpd.armv7" /tmp/development/simpleadmin/simpleadmin-httpd.armv7
+if errorlevel 1 goto push_fail
+"%ADB%" push "%DEV_DIR%\simpleadmin\www" /tmp/development/simpleadmin/www
+if errorlevel 1 goto push_fail
+"%ADB%" push "%DEV_DIR%\simpleadmin\systemd" /tmp/development/simpleadmin/systemd
+if errorlevel 1 goto push_fail
+"%ADB%" push "%DEV_DIR%\simpleadmin\simplepasswd" /tmp/development/simpleadmin/simplepasswd
+if errorlevel 1 goto push_fail
+"%ADB%" push "%DEV_DIR%\simpleadmin\mobileap_bridge0_mac.sh" /tmp/development/simpleadmin/mobileap_bridge0_mac.sh
+if errorlevel 1 goto push_fail
+goto push_ok
+:push_fail
 set "ERR=1"
 goto cleanup
 :push_ok

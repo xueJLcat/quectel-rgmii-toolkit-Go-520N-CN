@@ -4,17 +4,14 @@
 package main
 
 import (
-	"bytes"
 	"errors"
 	"fmt"
 	"io"
 	"log"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strconv"
 	"strings"
-	"sync"
 	"syscall"
 	"time"
 	"unsafe"
@@ -63,11 +60,6 @@ func openNativeTTYWithFlags(path string, flags int, label string) (*os.File, err
 
 func shouldSkipTermiosForATDevice(path string) bool {
 	return isSMDATDevice(path)
-}
-
-func isSMDATDevice(path string) bool {
-	base := filepath.Base(path)
-	return strings.HasPrefix(base, "smd")
 }
 
 func configureTTYRaw(fd uintptr) error {
@@ -242,6 +234,20 @@ func killProcessByCmdline(needle string) {
 	}
 }
 
+// errATLockHeldByAnotherProcess 在限时窗口内仍拿不到全局 AT 文件锁时返回。
+var errATLockHeldByAnotherProcess = errors.New("AT lock held by another process")
+
+var (
+	// atGlobalLockAcquireTimeout 限制全局 AT 文件锁的等待上限。长命令
+	// (扫网约 120 秒、短信事务约 70 秒)持锁期间,并发请求必须排队等到
+	// 其完成,而不是 30 秒即失败;200 秒覆盖最大命令时长 180 秒并留有余量,
+	// 到点后仍返回明确错误,避免被异常持锁者无限拖死。
+	// 声明为变量以便测试注入更小的上限。
+	atGlobalLockAcquireTimeout = 200 * time.Second
+	// atGlobalLockPollInterval 是非阻塞抢锁轮询间隔。
+	atGlobalLockPollInterval = 500 * time.Millisecond
+)
+
 func lockGlobalATFile() (func(), error) {
 	lockPath := os.Getenv("SIMPLEADMIN_AT_LOCK_FILE")
 	if strings.TrimSpace(lockPath) == "" {
@@ -251,14 +257,47 @@ func lockGlobalATFile() (func(), error) {
 	if err != nil {
 		return nil, fmt.Errorf("open AT lock file %s: %w", lockPath, err)
 	}
-	if err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX); err != nil {
+	if err := acquireGlobalATFlock(f, atGlobalLockAcquireTimeout, atGlobalLockPollInterval); err != nil {
 		_ = f.Close()
+		if errors.Is(err, errATLockHeldByAnotherProcess) {
+			return nil, fmt.Errorf("%w: file %s still locked after %s", errATLockHeldByAnotherProcess, lockPath, atGlobalLockAcquireTimeout)
+		}
 		return nil, fmt.Errorf("lock AT lock file %s: %w", lockPath, err)
 	}
 	return func() {
 		_ = syscall.Flock(int(f.Fd()), syscall.LOCK_UN)
 		_ = f.Close()
 	}, nil
+}
+
+// acquireGlobalATFlock 用 LOCK_EX|LOCK_NB 轮询抢锁,替代无限阻塞的
+// 阻塞式 flock:外部进程(含已崩溃但未释放锁的异常持有者之外的正常持锁者)
+// 长时间持锁时,AT 功能在超时后快速失败而不是永久挂起。
+func acquireGlobalATFlock(f *os.File, timeout, pollInterval time.Duration) error {
+	if timeout <= 0 {
+		timeout = 30 * time.Second
+	}
+	if pollInterval <= 0 {
+		pollInterval = 500 * time.Millisecond
+	}
+	deadline := time.Now().Add(timeout)
+	for {
+		err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX|syscall.LOCK_NB)
+		if err == nil {
+			return nil
+		}
+		if err != syscall.EWOULDBLOCK && err != syscall.EAGAIN {
+			return err
+		}
+		if time.Now().After(deadline) {
+			return errATLockHeldByAnotherProcess
+		}
+		sleep := pollInterval
+		if remaining := time.Until(deadline); remaining < sleep {
+			sleep = remaining
+		}
+		time.Sleep(sleep)
+	}
 }
 
 func shouldRecoverBusyATDevice(device string, err error) bool {
@@ -287,23 +326,6 @@ func openATCommandSession(path string) (*atCommandSession, error) {
 		return nil, err
 	}
 	return &atCommandSession{device: path, readFile: f, writeFile: f}, nil
-}
-
-func openPersistentSMDATCommandSession(path string) (*atCommandSession, error) {
-	// /dev/smd11 behaves like the verified shell workflow:
-	//   dd if=/dev/smd11 bs=4096 ... &
-	//   payload > /dev/smd11
-	// Keep one process-local reader helper open for the lifetime of the service,
-	// using the same 4096-byte read size as the verified dd command. Each AT
-	// payload is written through shell redirection fed from stdin, so the payload is
-	// not embedded in a printf command and does not need shell escaping.
-	// Response completion is decided by terminal AT lines such as OK,
-	// ERROR, +CME ERROR, or +CMS ERROR; no runtime kill/rebuild loop is used.
-	reader, err := getSMDATReader(path)
-	if err != nil {
-		return nil, err
-	}
-	return &atCommandSession{device: path, smdReader: reader}, nil
 }
 
 func closeATSession(session *atCommandSession) error {
@@ -379,343 +401,28 @@ func drainATSession(session *atCommandSession, maxDuration time.Duration) {
 	drainTTY(session.readFile, maxDuration)
 }
 
-func readATSessionUntilTokens(session *atCommandSession, maxDuration time.Duration, terminalTokens ...string) (string, error) {
+// markATSessionDirty 在事务超时后标记底层通道为脏:模块迟到响应可能仍在
+// 流入持久读取器,下一次 drain 需要用加长窗口清理。非持久读取器的普通
+// TTY 会话每次重新打开,无需标记。
+func markATSessionDirty(session *atCommandSession) {
+	if session == nil || session.smdReader == nil {
+		return
+	}
+	session.smdReader.markDirty()
+}
+
+func readATSessionUntilTokens(session *atCommandSession, maxDuration time.Duration, echoMarker string, terminalTokens ...string) (string, error) {
 	if session == nil {
 		return "", errors.New("AT session is not open")
 	}
 	if session.smdReader != nil {
-		return session.smdReader.readUntilTokens(maxDuration, terminalTokens...)
+		return session.smdReader.readUntilTokensWithEcho(maxDuration, echoMarker, terminalTokens...)
 	}
 	if session.readFile == nil {
 		return "", errors.New("AT session reader is not open")
 	}
-	return readTTYUntilTokens(session.readFile, maxDuration, terminalTokens...)
-}
-
-const (
-	smdATReadBufferSize     = 4096
-	smdATMaxBufferedBytes   = 512 * 1024
-	smdATReaderReadyFDEnv   = "SIMPLEADMIN_SMD_READY_FD"
-	smdATReaderReadyTimeout = 2 * time.Second
-)
-
-var smdATReaderRegistry = struct {
-	mu      sync.Mutex
-	readers map[string]*smdATReader
-}{readers: make(map[string]*smdATReader)}
-
-type smdATReader struct {
-	path   string
-	notify chan struct{}
-
-	mu      sync.Mutex
-	buffer  []byte
-	lastErr error
-}
-
-func getSMDATReader(path string) (*smdATReader, error) {
-	smdATReaderRegistry.mu.Lock()
-	defer smdATReaderRegistry.mu.Unlock()
-	if smdATReaderRegistry.readers == nil {
-		smdATReaderRegistry.readers = make(map[string]*smdATReader)
-	}
-	if reader := smdATReaderRegistry.readers[path]; reader != nil {
-		return reader, nil
-	}
-	reader, err := startSMDATReader(path)
-	if err != nil {
-		return nil, err
-	}
-	smdATReaderRegistry.readers[path] = reader
-	return reader, nil
-}
-
-func startSMDATReader(path string) (*smdATReader, error) {
-	reader := &smdATReader{path: path, notify: make(chan struct{}, 1)}
-	stdout, cmd, err := startSMDReaderProcess(path)
-	if err != nil {
-		return nil, err
-	}
-	go reader.readLoop(stdout, cmd)
-	logATDebug("started persistent SMD AT reader helper: %s pid=%d", path, cmd.Process.Pid)
-	return reader, nil
-}
-
-func openSMDReaderFile(path string) (*os.File, error) {
-	logATDebug("open persistent SMD reader: %s", path)
-	fd, err := syscall.Open(path, syscall.O_RDONLY, 0)
-	if err != nil {
-		return nil, err
-	}
-	return os.NewFile(uintptr(fd), path), nil
-}
-
-func startSMDReaderProcess(path string) (io.ReadCloser, *exec.Cmd, error) {
-	exe, err := os.Executable()
-	if err != nil {
-		return nil, nil, err
-	}
-	readyR, readyW, err := os.Pipe()
-	if err != nil {
-		return nil, nil, err
-	}
-	defer readyR.Close()
-
-	cmd := exec.Command(exe, "__smd-reader", path)
-	cmd.SysProcAttr = &syscall.SysProcAttr{Pdeathsig: syscall.SIGTERM}
-	cmd.ExtraFiles = []*os.File{readyW}
-	cmd.Env = append(os.Environ(), smdATReaderReadyFDEnv+"=3")
-	stdout, err := cmd.StdoutPipe()
-	if err != nil {
-		_ = readyW.Close()
-		return nil, nil, err
-	}
-	cmd.Stderr = os.Stderr
-	if err := cmd.Start(); err != nil {
-		_ = readyW.Close()
-		_ = stdout.Close()
-		return nil, nil, err
-	}
-	_ = readyW.Close()
-	if err := waitSMDReaderReady(readyR, cmd); err != nil {
-		_ = stdout.Close()
-		if cmd.Process != nil {
-			_ = cmd.Process.Kill()
-		}
-		_ = cmd.Wait()
-		return nil, nil, err
-	}
-	return stdout, cmd, nil
-}
-
-func waitSMDReaderReady(readyR *os.File, cmd *exec.Cmd) error {
-	done := make(chan error, 1)
-	go func() {
-		buf := []byte{0}
-		n, err := readyR.Read(buf)
-		if n > 0 {
-			done <- nil
-			return
-		}
-		if err == nil {
-			err = io.EOF
-		}
-		done <- err
-	}()
-	select {
-	case err := <-done:
-		if err != nil {
-			return fmt.Errorf("SMD reader helper did not report ready: %w", err)
-		}
-		return nil
-	case <-time.After(smdATReaderReadyTimeout):
-		return fmt.Errorf("SMD reader helper did not open device before timeout; pid=%d", cmd.Process.Pid)
-	}
-}
-
-func signalSMDReaderReady() {
-	fdText := strings.TrimSpace(os.Getenv(smdATReaderReadyFDEnv))
-	if fdText == "" {
-		return
-	}
-	fd, err := strconv.Atoi(fdText)
-	if err != nil || fd < 0 {
-		return
-	}
-	f := os.NewFile(uintptr(fd), "smd-reader-ready")
-	if f == nil {
-		return
-	}
-	_, _ = f.Write([]byte{1})
-	_ = f.Close()
-}
-
-func runSMDReaderCommand(args []string) {
-	if len(args) < 1 {
-		fmt.Fprintln(os.Stderr, "missing smd reader device")
-		os.Exit(2)
-	}
-	f, err := openSMDReaderFile(args[0])
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "open smd reader failed: %v\n", err)
-		os.Exit(1)
-	}
-	defer f.Close()
-	signalSMDReaderReady()
-	buf := make([]byte, smdATReadBufferSize)
-	for {
-		n, err := f.Read(buf)
-		if n > 0 {
-			if writeErr := writeAll(os.Stdout, buf[:n]); writeErr != nil {
-				fmt.Fprintf(os.Stderr, "smd reader stdout write failed: %v\n", writeErr)
-				os.Exit(1)
-			}
-		}
-		if err == nil {
-			continue
-		}
-		if isTemporaryTTYReadError(err) {
-			time.Sleep(20 * time.Millisecond)
-			continue
-		}
-		fmt.Fprintf(os.Stderr, "smd reader read failed: %v\n", err)
-		os.Exit(1)
-	}
-}
-
-func writeAll(w io.Writer, data []byte) error {
-	for len(data) > 0 {
-		n, err := w.Write(data)
-		if err != nil {
-			return err
-		}
-		if n <= 0 {
-			return io.ErrUnexpectedEOF
-		}
-		data = data[n:]
-	}
-	return nil
-}
-
-func (r *smdATReader) readLoop(stdout io.ReadCloser, cmd *exec.Cmd) {
-	buf := make([]byte, smdATReadBufferSize)
-	for {
-		n, err := stdout.Read(buf)
-		if n > 0 {
-			r.append(buf[:n])
-		}
-		if err == nil {
-			continue
-		}
-		logATDebug("persistent SMD reader helper ended on %s: %v", r.path, err)
-		r.setLastErr(err)
-		_ = stdout.Close()
-		_ = cmd.Wait()
-		time.Sleep(250 * time.Millisecond)
-		for {
-			newStdout, newCmd, openErr := startSMDReaderProcess(r.path)
-			if openErr == nil {
-				logATDebug("persistent SMD reader helper restarted: %s pid=%d", r.path, newCmd.Process.Pid)
-				r.setLastErr(nil)
-				stdout = newStdout
-				cmd = newCmd
-				break
-			}
-			logATDebug("persistent SMD reader helper restart failed on %s: %v", r.path, openErr)
-			r.setLastErr(openErr)
-			time.Sleep(time.Second)
-		}
-	}
-}
-
-func (r *smdATReader) append(data []byte) {
-	r.mu.Lock()
-	r.buffer = append(r.buffer, data...)
-	if len(r.buffer) > smdATMaxBufferedBytes {
-		r.buffer = append([]byte(nil), r.buffer[len(r.buffer)-smdATMaxBufferedBytes:]...)
-	}
-	r.mu.Unlock()
-	r.signal()
-}
-
-func (r *smdATReader) setLastErr(err error) {
-	r.mu.Lock()
-	r.lastErr = err
-	r.mu.Unlock()
-	r.signal()
-}
-
-func (r *smdATReader) signal() {
-	select {
-	case r.notify <- struct{}{}:
-	default:
-	}
-}
-
-func (r *smdATReader) drain(maxDuration time.Duration) {
-	r.mu.Lock()
-	r.buffer = nil
-	r.mu.Unlock()
-	if maxDuration <= 0 {
-		logATDebug("drained persistent SMD AT reader buffer: %s", r.path)
-		return
-	}
-	deadline := time.NewTimer(maxDuration)
-	defer deadline.Stop()
-	idle := time.NewTimer(30 * time.Millisecond)
-	defer idle.Stop()
-	for {
-		select {
-		case <-r.notify:
-			r.mu.Lock()
-			r.buffer = nil
-			r.mu.Unlock()
-			if !idle.Stop() {
-				select {
-				case <-idle.C:
-				default:
-				}
-			}
-			idle.Reset(30 * time.Millisecond)
-		case <-idle.C:
-			logATDebug("drained persistent SMD AT reader buffer after idle: %s", r.path)
-			return
-		case <-deadline.C:
-			logATDebug("drained persistent SMD AT reader buffer after max duration: %s", r.path)
-			return
-		}
-	}
-}
-
-func (r *smdATReader) snapshot() (string, error) {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	return string(append([]byte(nil), r.buffer...)), r.lastErr
-}
-
-func (r *smdATReader) writePayload(payload string) error {
-	// Keep the shell redirection semantics that work with /dev/smd11, but do not
-	// use printf. The AT payload is passed over stdin and copied to the device by
-	// the shell-opened redirection, which avoids quoting issues and keeps SMS Ctrl-Z
-	// payloads byte-for-byte. This cat is write-only and does not read /dev/smd11.
-	cmd := exec.Command("/bin/sh", "-c", `cat > "$1"`, "smd-writer", r.path)
-	cmd.Stdin = strings.NewReader(payload)
-	var stderr bytes.Buffer
-	cmd.Stderr = &stderr
-	if err := cmd.Run(); err != nil {
-		msg := strings.TrimSpace(stderr.String())
-		if msg != "" {
-			return fmt.Errorf("SMD shell stdin writer failed: %w: %s", err, msg)
-		}
-		return fmt.Errorf("SMD shell stdin writer failed: %w", err)
-	}
-	return nil
-}
-
-func (r *smdATReader) readUntilTokens(maxDuration time.Duration, terminalTokens ...string) (string, error) {
-	if maxDuration <= 0 {
-		maxDuration = time.Second
-	}
-	deadline := time.NewTimer(maxDuration)
-	defer deadline.Stop()
-	for {
-		out, lastErr := r.snapshot()
-		if out != "" {
-			logATDebug("SMD persistent reader snapshot: %s", outputSummary(out))
-		}
-		if containsAnyToken(out, terminalTokens...) {
-			return out, nil
-		}
-		select {
-		case <-r.notify:
-			continue
-		case <-deadline.C:
-			if out != "" || lastErr == nil {
-				return out, nil
-			}
-			return out, lastErr
-		}
-	}
+	out, err := readTTYUntilTokens(session.readFile, maxDuration, terminalTokens...)
+	return trimOutputBeforeEchoMarker(out, echoMarker), err
 }
 
 func readTTYUntilTokens(f *os.File, maxDuration time.Duration, terminalTokens ...string) (string, error) {
@@ -756,7 +463,10 @@ func readTTYUntilTokens(f *os.File, maxDuration time.Duration, terminalTokens ..
 				}
 				// Some SMD character devices report EOF while no response is ready yet.
 				// Keep waiting until the command timeout instead of treating it as a
-				// terminal failure.
+				// terminal failure. Sleep like readTTYUntilIdle does: select keeps
+				// reporting the EOF condition as readable, so without a sleep this
+				// loop would busy-spin at 100% CPU.
+				time.Sleep(20 * time.Millisecond)
 				continue
 			}
 			return out.String(), err

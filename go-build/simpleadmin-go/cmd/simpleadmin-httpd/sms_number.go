@@ -8,21 +8,51 @@ import (
 
 var smsNumberCleanupRE = regexp.MustCompile(`[^0-9+]`)
 
+// smsNumberLetterRE 命中输入中的字母:vanity 号码(如 +1-800-FLOWERS)
+// 静默剔除字母后会变成错误号码(+1800),必须显式报错。
+var smsNumberLetterRE = regexp.MustCompile(`[A-Za-z]`)
+
 func normalizeSMSNumber(number string, cimiRaw string) (string, error) {
-	clean := smsNumberCleanupRE.ReplaceAllString(strings.TrimSpace(number), "")
+	trimmed := strings.TrimSpace(number)
+	if smsNumberLetterRE.MatchString(trimmed) {
+		return "", fmt.Errorf("号码包含字母，无法发送短信: %s", trimmed)
+	}
+	clean := smsNumberCleanupRE.ReplaceAllString(trimmed, "")
 	if strings.HasPrefix(clean, "00") {
-		return "+" + stripNonDigits(clean[2:]), nil
+		digits := stripNonDigits(clean[2:])
+		if digits == "" {
+			// "00"/"00-" 等退化输入不得拼出裸 "+",按空号码拦截。
+			return "", nil
+		}
+		return "+" + digits, nil
 	}
 	if strings.HasPrefix(clean, "+") {
-		return "+" + stripNonDigits(clean), nil
+		digits := stripNonDigits(clean)
+		if digits == "" {
+			return "", nil
+		}
+		return "+" + digits, nil
 	}
 	clean = stripNonDigits(clean)
 	if clean == "" {
 		return "", nil
 	}
+	// 客服/应急短号(10001、10086、95588、110 等)不加国家码,
+	// 加前缀后运营商无法路由,会返回 +CMS ERROR。
+	if len(clean) <= 6 {
+		return clean, nil
+	}
+	// 国内长途/本地拨号带一个前导 0(如 010...):归一化为国际格式时
+	// 剥离一个前导 0,避免拼出 +86010... 这类不可路由号码。
+	if strings.HasPrefix(clean, "0") {
+		clean = clean[1:]
+	}
 
 	imsi := parseCIMIResponseIMSI(cimiRaw)
 	if len(imsi) < 3 {
+		if isCIMINotReady(cimiRaw) {
+			return "", fmt.Errorf("模块未就绪，请稍后重试")
+		}
 		return "", fmt.Errorf("AT+CIMI 未返回有效 IMSI，无法自动添加国家/地区代码")
 	}
 	mcc := imsi[:3]
@@ -31,6 +61,26 @@ func normalizeSMSNumber(number string, cimiRaw string) (string, error) {
 		return "", fmt.Errorf("AT+CIMI 返回的 MCC %s 未配置国家/地区代码", mcc)
 	}
 	return "+" + callingCode + clean, nil
+}
+
+// isCIMINotReady 判定 AT+CIMI 应答是否属于"模块未就绪"而非真无 SIM:
+// 开机保护期/模块重启保护期的后台占位文本、空应答、纯运行器错误文本
+// 均视为未就绪;含 SIM 缺失标志(+CME ERROR: 10、SIM NOT INSERTED 等)
+// 时按真无 SIM 处理,保留原文案分支。
+func isCIMINotReady(raw string) bool {
+	trimmed := strings.TrimSpace(raw)
+	if trimmed == "" {
+		return true
+	}
+	upper := strings.ToUpper(trimmed)
+	if strings.Contains(upper, "SIM NOT INSERTED") || strings.Contains(upper, "+CME ERROR: 10") || strings.Contains(upper, "+CPIN: NOT INSERTED") {
+		return false
+	}
+	if strings.Contains(trimmed, atCachePendingText) {
+		return true
+	}
+	// 过滤掉占位/运行器错误后无任何模块数据行,视为未就绪。
+	return len(atLines(raw)) == 0
 }
 
 func parseCIMIResponseIMSI(raw string) string {
@@ -51,8 +101,11 @@ func mccToCallingCode(mcc string) string {
 		return "1"
 	case "330", "332", "338", "342", "344", "346", "348", "350", "352":
 		return "1"
-	case "354", "356", "358", "360", "362", "364", "365", "366":
+	case "354", "356", "358", "360", "364", "365", "366":
 		return "1"
+	// MCC 362(荷属安的列斯:库拉索/博内尔 +599,圣马丁 +1-721)横跨两个
+	// 编号计划,自动加 +1 对两地都无法路由(圣马丁还需 721 区号)。
+	// 故不纳入映射,落入"未配置国家/地区代码"分支提示用户用国际格式输入。
 	case "370", "374", "376":
 		return "1"
 	case "334":

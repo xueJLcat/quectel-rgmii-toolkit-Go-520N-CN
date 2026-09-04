@@ -1,0 +1,505 @@
+/* 基础原语:按钮/表单/开关/表格/进度/加载(全 --sa-* 令牌化,@layer components 压过 preflight) */
+@layer components {
+  .btn {
+    display: inline-block;
+    padding: var(--sa-space-2) var(--sa-space-4);
+    font-size: var(--sa-text-base);
+    font-weight: 600;
+    line-height: 1.4;
+    color: var(--sa-text);
+    text-align: center;
+    white-space: nowrap;
+    vertical-align: middle;
+    cursor: pointer;
+    user-select: none;
+    background-color: transparent;
+    border: 1px solid transparent;
+    border-radius: var(--sa-radius-sm);
+    transition:
+      color var(--sa-dur-fast) var(--sa-ease),
+      background-color var(--sa-dur-fast) var(--sa-ease),
+      border-color var(--sa-dur-fast) var(--sa-ease),
+      transform var(--sa-dur-fast) var(--sa-ease);
+  }
+
+  .btn:hover {
+    text-decoration: none;
+  }
+
+  .btn:active {
+    transform: scale(0.98);
+  }
+
+  .btn:disabled,
+  .btn.disabled {
+    opacity: 0.5;
+    pointer-events: none;
+  }
+
+  .btn-sm {
+    padding: var(--sa-space-1) 10px;
+    font-size: var(--sa-text-sm);
+  }
+
+  .btn-primary {
+    color: var(--sa-bg);
+    background-color: var(--sa-accent);
+    background-image: var(--sa-gradient);
+    border-color: transparent;
+    box-shadow: var(--sa-shadow-sm);
+    transition:
+      color var(--sa-dur-fast) var(--sa-ease),
+      background-color var(--sa-dur-fast) var(--sa-ease),
+      border-color var(--sa-dur-fast) var(--sa-ease),
+      transform var(--sa-dur-fast) var(--sa-ease),
+      filter var(--sa-dur-fast) var(--sa-ease),
+      box-shadow var(--sa-dur-fast) var(--sa-ease);
+  }
+
+  .btn-primary:hover {
+    filter: brightness(1.08);
+    box-shadow: var(--sa-glow-accent);
+    transform: translateY(-1px);
+  }
+
+  .btn-secondary {
+    color: var(--sa-text);
+    background-color: transparent;
+    border-color: var(--sa-border-strong);
+  }
+
+  .btn-secondary:hover {
+    background-color: var(--sa-surface-2);
+    border-color: color-mix(in srgb, var(--sa-accent) 45%, var(--sa-border-strong));
+  }
+
+  .btn-ghost {
+    color: var(--sa-text-soft);
+    background-color: transparent;
+    border-color: transparent;
+  }
+
+  .btn-ghost:hover {
+    background-color: var(--sa-surface-2);
+  }
+
+  .btn-danger {
+    color: var(--sa-bg);
+    background-color: var(--sa-danger);
+    background-image: var(--sa-gradient-warm);
+    border-color: transparent;
+    box-shadow: var(--sa-shadow-sm);
+    transition:
+      color var(--sa-dur-fast) var(--sa-ease),
+      background-color var(--sa-dur-fast) var(--sa-ease),
+      border-color var(--sa-dur-fast) var(--sa-ease),
+      transform var(--sa-dur-fast) var(--sa-ease),
+      filter var(--sa-dur-fast) var(--sa-ease),
+      box-shadow var(--sa-dur-fast) var(--sa-ease);
+  }
+
+  .btn-danger:hover {
+    filter: brightness(1.08);
+    box-shadow: var(--sa-glow-danger);
+    transform: translateY(-1px);
+  }
+
+  .sa-link-btn {
+    display: inline;
+    padding: 0;
+    font-size: inherit;
+    font-weight: inherit;
+    color: var(--sa-accent);
+    background: none;
+    border: 0;
+    text-decoration: underline;
+    text-underline-offset: 2px;
+  }
+
+  .sa-link-btn:hover {
+    opacity: 0.75;
+  }
+
+  .form-control {
+    display: block;
+    width: 100%;
+    padding: var(--sa-space-2) var(--sa-space-3);
+    font-size: var(--sa-text-base);
+    line-height: 1.4;
+    color: var(--sa-control-text);
+    background-color: var(--sa-control-bg);
+    border: 1px solid var(--sa-border-strong);
+    border-radius: var(--sa-radius-sm);
+    transition:
+      border-color var(--sa-dur-fast) var(--sa-ease),
+      box-shadow var(--sa-dur-fast) var(--sa-ease);
+  }
+
+  .form-control::placeholder {
+    color: var(--sa-muted);
+  }
+
+  .form-control:focus {
+    border-color: var(--sa-accent);
+    outline: 0;
+    box-shadow: 0 0 0 3px var(--sa-focus-ring);
+  }
+
+  .form-control:disabled {
+    opacity: 0.6;
+  }
+
+  textarea.form-control {
+    min-height: 2.4rem;
+  }
+
+  .form-select {
+    display: block;
+    width: 100%;
+    padding: var(--sa-space-2) var(--sa-space-7) var(--sa-space-2) var(--sa-space-3);
+    font-size: var(--sa-text-base);
+    line-height: 1.4;
+    color: var(--sa-control-text);
+    background-color: var(--sa-control-bg);
+    background-image: url("data:image/svg+xml,%3csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3e%3cpath fill='none' stroke='%236b7280' stroke-linecap='round' stroke-linejoin='round' stroke-width='2' d='m2 5 6 6 6-6'/%3e%3c/svg%3e");
+    background-repeat: no-repeat;
+    background-position: right var(--sa-space-3) center;
+    background-size: 14px 12px;
+    border: 1px solid var(--sa-border-strong);
+    border-radius: var(--sa-radius-sm);
+    appearance: none;
+    transition:
+      border-color var(--sa-dur-fast) var(--sa-ease),
+      box-shadow var(--sa-dur-fast) var(--sa-ease);
+  }
+
+  html[data-bs-theme="dark"] .form-select {
+    background-image: url("data:image/svg+xml,%3csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3e%3cpath fill='none' stroke='%23aeb8c8' stroke-linecap='round' stroke-linejoin='round' stroke-width='2' d='m2 5 6 6 6-6'/%3e%3c/svg%3e");
+  }
+
+  .form-select:focus {
+    border-color: var(--sa-accent);
+    outline: 0;
+    box-shadow: 0 0 0 3px var(--sa-focus-ring);
+  }
+
+  .form-select:disabled {
+    opacity: 0.6;
+  }
+
+  .form-label {
+    display: inline-block;
+    margin-bottom: var(--sa-space-2);
+    font-size: var(--sa-text-sm);
+    font-weight: 500;
+    color: var(--sa-text-soft);
+  }
+
+  .form-text {
+    display: block;
+    margin-top: var(--sa-space-1);
+    font-size: var(--sa-text-xs);
+    color: var(--sa-muted);
+  }
+
+  .form-group {
+    margin-bottom: var(--sa-space-3);
+  }
+
+  .form-check {
+    display: block;
+    position: relative;
+    padding-left: 1.65em;
+    margin-bottom: var(--sa-space-2);
+  }
+
+  .form-check-input {
+    float: left;
+    width: 1.05em;
+    height: 1.05em;
+    margin-left: -1.65em;
+    margin-top: 0.22em;
+    background-color: var(--sa-control-bg);
+    background-repeat: no-repeat;
+    background-position: center;
+    background-size: contain;
+    border: 1px solid var(--sa-border-strong);
+    border-radius: 0.28em;
+    appearance: none;
+    vertical-align: top;
+    transition:
+      background-color var(--sa-dur-fast) var(--sa-ease),
+      border-color var(--sa-dur-fast) var(--sa-ease);
+  }
+
+  .form-check-input:checked {
+    background-color: var(--sa-accent);
+    /* 勾选态多彩底:勾选图标必须叠在渐变之上,background 简写按层排序 */
+    background-image: url("data:image/svg+xml,%3csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 20 20'%3e%3cpath fill='none' stroke='%23fff' stroke-linecap='round' stroke-linejoin='round' stroke-width='3' d='m6 10 3 3 6-6'/%3e%3c/svg%3e"), var(--sa-gradient);
+    border-color: transparent;
+    box-shadow: var(--sa-shadow-sm);
+  }
+
+  .form-check-label {
+    cursor: pointer;
+  }
+
+  .sa-switch {
+    appearance: none;
+    position: relative;
+    flex: 0 0 auto;
+    width: 40px;
+    height: 22px;
+    margin: 0;
+    cursor: pointer;
+    background-color: var(--sa-border-strong);
+    border: 0;
+    border-radius: var(--sa-radius-pill);
+    vertical-align: middle;
+    transition: background-color var(--sa-dur-fast) var(--sa-ease);
+  }
+
+  .sa-switch::before {
+    content: "";
+    position: absolute;
+    top: 3px;
+    left: 3px;
+    width: 16px;
+    height: 16px;
+    border-radius: var(--sa-radius-pill);
+    background-color: var(--sa-surface);
+    box-shadow: var(--sa-shadow-sm);
+    transition: transform var(--sa-dur-fast) var(--sa-ease);
+  }
+
+  .sa-switch:checked {
+    background-color: var(--sa-accent);
+    background-image: var(--sa-gradient);
+    box-shadow: var(--sa-shadow-sm);
+  }
+
+  .sa-switch:checked::before {
+    transform: translateX(18px);
+  }
+
+  .sa-switch:disabled {
+    opacity: 0.5;
+    cursor: default;
+  }
+
+  .input-group {
+    display: flex;
+    flex-wrap: nowrap;
+    align-items: stretch;
+    width: 100%;
+  }
+
+  .input-group > .form-control,
+  .input-group > .form-select {
+    flex: 1 1 auto;
+    width: 1%;
+    min-width: 0;
+  }
+
+  .input-group > .btn {
+    flex: 0 0 auto;
+  }
+
+  .input-group > :not(:last-child) {
+    border-top-right-radius: 0;
+    border-bottom-right-radius: 0;
+  }
+
+  .input-group > :not(:first-child) {
+    margin-left: -1px;
+    border-top-left-radius: 0;
+    border-bottom-left-radius: 0;
+  }
+
+  .input-group-text {
+    display: inline-flex;
+    align-items: center;
+    padding: var(--sa-space-2) var(--sa-space-3);
+    font-size: var(--sa-text-sm);
+    color: var(--sa-muted);
+    white-space: nowrap;
+    background-color: var(--sa-surface-2);
+    border: 1px solid var(--sa-border-strong);
+  }
+
+  .table {
+    width: 100%;
+    margin-bottom: 0;
+    color: var(--sa-text);
+    border-collapse: collapse;
+    border-spacing: 0;
+  }
+
+  .table-responsive {
+    overflow-x: auto;
+  }
+
+  .sa-table thead {
+    background-color: var(--sa-surface-2);
+    background-image: linear-gradient(90deg, var(--sa-surface-2), color-mix(in srgb, var(--sa-accent) 7%, var(--sa-surface-2)) 130%);
+  }
+
+  .sa-table th,
+  .sa-table td {
+    padding: var(--sa-space-2) var(--sa-space-3);
+    text-align: left;
+    border-bottom: 1px solid var(--sa-border);
+  }
+
+  .sa-table thead th {
+    font-size: var(--sa-text-sm);
+    font-weight: 600;
+    color: var(--sa-muted);
+  }
+
+  .sa-table tbody td {
+    font-size: var(--sa-text-base);
+  }
+
+  .sa-table tbody tr:hover {
+    background-color: var(--sa-surface-2);
+  }
+
+  .sa-table tbody tr:last-child td {
+    border-bottom: 0;
+  }
+
+  .sa-table .sa-col-action,
+  .sa-table th.sa-col-action {
+    width: 1%;
+    text-align: right;
+    white-space: nowrap;
+  }
+
+  .sa-rule-badge {
+    display: inline-block;
+    padding: 2px 10px;
+    font-size: var(--sa-text-sm);
+    font-weight: 600;
+    line-height: 1.4;
+    border-radius: var(--sa-radius-pill);
+    background-color: var(--sa-surface-3);
+    color: var(--sa-text-soft);
+  }
+
+  .sa-rule-badge.is-accept {
+    background-color: color-mix(in srgb, var(--sa-success) 14%, var(--sa-surface));
+    color: var(--sa-success);
+  }
+
+  .sa-rule-badge.is-block {
+    background-color: color-mix(in srgb, var(--sa-danger) 12%, var(--sa-surface));
+    color: var(--sa-danger);
+  }
+
+  .progress {
+    display: flex;
+    height: 8px;
+    overflow: hidden;
+    background-color: var(--sa-bg-soft);
+    border-radius: var(--sa-radius-pill);
+  }
+
+  .progress-bar {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    color: var(--sa-bg);
+    font-size: var(--sa-text-xs);
+    transition: width var(--sa-dur) var(--sa-ease);
+  }
+
+  .bg-success {
+    background-color: var(--sa-success);
+  }
+
+  .bg-warning {
+    background-color: var(--sa-warning);
+  }
+
+  .bg-danger {
+    background-color: var(--sa-danger);
+  }
+
+  /* 进度条三色渐变,与状态语义对应(信号质量条使用) */
+  .progress-bar.bg-success {
+    background-image: linear-gradient(90deg, color-mix(in srgb, var(--sa-success) 72%, #a7f3d0), var(--sa-success));
+  }
+
+  .progress-bar.bg-warning {
+    background-image: linear-gradient(90deg, color-mix(in srgb, var(--sa-warning) 70%, #fde68a), var(--sa-warning));
+  }
+
+  .progress-bar.bg-danger {
+    background-image: linear-gradient(90deg, color-mix(in srgb, var(--sa-danger) 70%, #fecaca), var(--sa-danger));
+  }
+
+  .spinner-border {
+    display: inline-block;
+    width: 1.4em;
+    height: 1.4em;
+    border: 0.18em solid var(--sa-muted);
+    border-right-color: transparent;
+    border-radius: 50%;
+    animation: sa-spinner-rotate 0.75s linear infinite;
+  }
+
+  .spinner-border-sm {
+    width: 1em;
+    height: 1em;
+    border-width: 0.15em;
+  }
+
+  @keyframes sa-spinner-rotate {
+    to {
+      transform: rotate(360deg);
+    }
+  }
+
+  .loader {
+    display: inline-block;
+    width: 56px;
+    height: 56px;
+    border: 2px solid var(--sa-border-strong);
+    /* 双色旋转环:蓝(顶)与紫(右)随旋转过渡,比单色环更灵动 */
+    border-top-color: var(--sa-accent);
+    border-right-color: var(--sa-accent-2);
+    border-radius: 50%;
+    animation: sa-loader-rotation 1.2s linear infinite;
+  }
+
+  @keyframes sa-loader-rotation {
+    0% {
+      transform: rotate(0deg);
+    }
+
+    100% {
+      transform: rotate(360deg);
+    }
+  }
+
+  .w-50 {
+    width: 50%;
+  }
+
+  .w-75 {
+    width: 75%;
+  }
+
+  .btn:focus-visible,
+  .sa-link-btn:focus-visible,
+  .form-control:focus-visible,
+  .form-select:focus-visible,
+  .form-check-input:focus-visible,
+  .sa-switch:focus-visible,
+  .sa-menu-link:focus-visible,
+  .sa-sms-summary-row:focus-visible {
+    outline: 0;
+    box-shadow: 0 0 0 3px var(--sa-focus-ring);
+  }
+}

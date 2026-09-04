@@ -37,7 +37,7 @@ func TestATCommandTimeoutUsesLongWaitForDisableIPPassthrough(t *testing.T) {
 	}
 }
 
-func TestPageATCommandsIsolateLANIPOnlyInFixedCacheCommands(t *testing.T) {
+func TestPageATCommandsNetworkConfigAndSystemStatusCommands(t *testing.T) {
 	deviceInfo := pageATCommands(atKeyDeviceInfo)
 	wantDeviceInfo := []string{
 		`AT+CGMI;+CGSN;+QGMR;+CIMI;+ICCID;+CNUM`,
@@ -48,14 +48,19 @@ func TestPageATCommandsIsolateLANIPOnlyInFixedCacheCommands(t *testing.T) {
 		t.Fatalf("device info commands = %#v, want %#v", deviceInfo, wantDeviceInfo)
 	}
 
-	settingsStatus := pageATCommands(atKeySettingsStatus)
-	wantSettingsStatus := []string{
+	networkConfigStatus := pageATCommands(atKeyNetworkConfigStatus)
+	wantNetworkConfigStatus := []string{
 		`AT+QMAP="MPDN_RULE";+QMAP="DHCPV6DNS";+QCFG="usbnet";+QMAP="DMZ";+QMAP="DHCPV4DNS"`,
-		`AT+CGSN`,
 		`AT+QMAP="LANIP"`,
 	}
-	if !reflect.DeepEqual(settingsStatus, wantSettingsStatus) {
-		t.Fatalf("settings status commands = %#v, want %#v", settingsStatus, wantSettingsStatus)
+	if !reflect.DeepEqual(networkConfigStatus, wantNetworkConfigStatus) {
+		t.Fatalf("network config status commands = %#v, want %#v", networkConfigStatus, wantNetworkConfigStatus)
+	}
+
+	systemStatus := pageATCommands(atKeySystemStatus)
+	wantSystemStatus := []string{`AT+CGSN`}
+	if !reflect.DeepEqual(systemStatus, wantSystemStatus) {
+		t.Fatalf("system status commands = %#v, want %#v", systemStatus, wantSystemStatus)
 	}
 }
 
@@ -454,49 +459,6 @@ func TestConsoleWebSocketOriginAllowed(t *testing.T) {
 	}
 }
 
-func TestNativeConsoleRequiresFixedCredentials(t *testing.T) {
-	if nativeConsoleUsername != "root" {
-		t.Fatalf("nativeConsoleUsername = %q, want root", nativeConsoleUsername)
-	}
-	if nativeConsolePassword != "admin321" {
-		t.Fatalf("nativeConsolePassword = %q, want admin321", nativeConsolePassword)
-	}
-}
-
-func TestNativeConsoleLineInputEchoAndHiddenPassword(t *testing.T) {
-	var builder strings.Builder
-	var echo strings.Builder
-	done, err := appendNativeConsoleLineInput(&builder, []byte("roox\x7ft\r"), false, func(payload []byte) error {
-		echo.Write(payload)
-		return nil
-	})
-	if err != nil || !done {
-		t.Fatalf("append username done=%v err=%v", done, err)
-	}
-	if got := builder.String(); got != "root" {
-		t.Fatalf("username builder = %q, want root", got)
-	}
-	if got := echo.String(); !strings.Contains(got, "\b \b") || strings.Contains(got, "admin321") {
-		t.Fatalf("username echo unexpected: %q", got)
-	}
-
-	builder.Reset()
-	echo.Reset()
-	done, err = appendNativeConsoleLineInput(&builder, []byte("admin321\r"), true, func(payload []byte) error {
-		echo.Write(payload)
-		return nil
-	})
-	if err != nil || !done {
-		t.Fatalf("append password done=%v err=%v", done, err)
-	}
-	if got := builder.String(); got != "admin321" {
-		t.Fatalf("password builder = %q, want admin321", got)
-	}
-	if got := echo.String(); got != "\r\n" {
-		t.Fatalf("hidden password echo = %q, want newline only", got)
-	}
-}
-
 func TestNativeConsoleBannerDoesNotMentionWebPasswordHelper(t *testing.T) {
 	data, err := os.ReadFile("native_console.go")
 	if err != nil {
@@ -516,7 +478,7 @@ func TestWebsocketAcceptKey(t *testing.T) {
 	}
 }
 
-func TestParseSettingsStatusMPDNRuleDisabledLowercase(t *testing.T) {
+func TestParseNetworkConfigStatusMPDNRuleDisabledLowercase(t *testing.T) {
 	raw := `AT+QMAP="MPDN_RULE";+QMAP="DHCPV6DNS";+QCFG="usbnet";+QMAP="DMZ";+QMAP="LANIP";+QMAP="DHCPV4DNS"
 
 +QMAP: "MPDN_rule",0,0,0,0,0
@@ -536,7 +498,7 @@ func TestParseSettingsStatusMPDNRuleDisabledLowercase(t *testing.T) {
 +QMAP: "DHCPV4DNS","enable"
 
 OK`
-	got := parseSettingsStatusAT(raw)
+	got := parseNetworkConfigStatusAT(raw)
 	if got["ipPassStatus"] != false {
 		t.Fatalf("ipPassStatus = %v, want false", got["ipPassStatus"])
 	}
@@ -554,23 +516,23 @@ OK`
 	}
 }
 
-func TestParseSettingsStatusMPDNRuleEnabled(t *testing.T) {
+func TestParseNetworkConfigStatusMPDNRuleEnabled(t *testing.T) {
 	raw := `+QMAP: "MPDN_rule",0,1,0,1,1,"FF:FF:FF:FF:FF:FF"
 +QMAP: "MPDN_rule",1,0,0,0,0
 OK`
-	got := parseSettingsStatusAT(raw)
+	got := parseNetworkConfigStatusAT(raw)
 	if got["ipPassStatus"] != true {
 		t.Fatalf("ipPassStatus = %v, want true", got["ipPassStatus"])
 	}
 }
 
-func TestSettingsStatusCommandAndParserReadsIMEI(t *testing.T) {
-	command := pageATCommand(atKeySettingsStatus)
+func TestSystemStatusCommandAndParserReadsIMEI(t *testing.T) {
+	command := pageATCommand(atKeySystemStatus)
 	if !strings.Contains(command, "+CGSN") {
-		t.Fatalf("settings status command = %q, want +CGSN", command)
+		t.Fatalf("system status command = %q, want +CGSN", command)
 	}
-	raw := "AT+QMAP=\"DHCPV4DNS\";+CGSN\r\n+QMAP: \"DHCPV4DNS\",\"enable\"\r\n867123456789012\r\n\r\nOK\r\n"
-	got := parseSettingsStatusAT(raw)
+	raw := "AT+CGSN\r\n867123456789012\r\n\r\nOK\r\n"
+	got := parseSystemStatusAT(raw)
 	if got["imei"] != "867123456789012" {
 		t.Fatalf("imei = %v, want 867123456789012", got["imei"])
 	}
@@ -726,7 +688,7 @@ func TestParseSMSListMergesSameSenderSameDateFragments(t *testing.T) {
 ` + testUCS2Hex(parts[3]) + `
 OK`
 
-	data := parseSMSListAT(raw)
+	data := parseSMSListAT(raw, "ME")
 	messages := data["messages"].([]map[string]any)
 	if len(messages) != 1 {
 		t.Fatalf("len(messages) = %d, want 1: %#v", len(messages), messages)
@@ -758,7 +720,7 @@ func TestParseSMSListMergesSameSenderWithinFiveSeconds(t *testing.T) {
 ` + testUCS2Hex(parts[3]) + `
 OK`
 
-	data := parseSMSListAT(raw)
+	data := parseSMSListAT(raw, "ME")
 	messages := data["messages"].([]map[string]any)
 	if len(messages) != 1 {
 		t.Fatalf("len(messages) = %d, want 1: %#v", len(messages), messages)
@@ -805,7 +767,7 @@ func TestParseSMSListKeepsContinuousIndexOrder(t *testing.T) {
 ` + testUCS2Hex(parts[2]) + `
 OK`
 
-	data := parseSMSListAT(raw)
+	data := parseSMSListAT(raw, "ME")
 	messages := data["messages"].([]map[string]any)
 	if len(messages) != 1 {
 		t.Fatalf("len(messages) = %d, want 1: %#v", len(messages), messages)
@@ -834,7 +796,7 @@ func TestParseSMSListKeepsNumberedMenuOrder(t *testing.T) {
 ` + testUCS2Hex(parts[2]) + `
 OK`
 
-	data := parseSMSListAT(raw)
+	data := parseSMSListAT(raw, "ME")
 	messages := data["messages"].([]map[string]any)
 	if len(messages) != 1 {
 		t.Fatalf("len(messages) = %d, want 1: %#v", len(messages), messages)
@@ -866,7 +828,7 @@ func TestParseSMSListKeepsPointsExchangeFragmentsInStorageOrder(t *testing.T) {
 ` + testUCS2Hex(parts[3]) + `
 OK`
 
-	data := parseSMSListAT(raw)
+	data := parseSMSListAT(raw, "ME")
 	messages := data["messages"].([]map[string]any)
 	if len(messages) != 1 {
 		t.Fatalf("len(messages) = %d, want 1: %#v", len(messages), messages)
@@ -902,7 +864,7 @@ func TestDeviceInfoCommandSplitsStaticAndFreshSIMStatus(t *testing.T) {
 		}
 	}
 	if strings.Contains(staticCommand, "+CGMM") {
-		t.Fatalf("device static command = %q, want model queried only by standalone AT+CGMM", staticCommand)
+		t.Fatalf("device static command = %q, want no CGMM (model hardcoded, not queried)", staticCommand)
 	}
 	for _, part := range []string{"+QSIMSTAT?", "+CPIN?", `+QMAP="WWAN"`} {
 		if !strings.Contains(freshCommand, part) {
@@ -920,7 +882,7 @@ func TestDeviceInfoCommandSplitsStaticAndFreshSIMStatus(t *testing.T) {
 	}
 }
 
-func TestParseDeviceInfoWithoutCGMMKeepsFirmwareSlot(t *testing.T) {
+func TestParseDeviceInfoParserLeavesModelSlotWhenAbsent(t *testing.T) {
 	raw := `+QSIMSTAT: 0,1
 +CPIN: READY
 Quectel
@@ -936,8 +898,10 @@ OK`
 	if got := data["manufacturer"]; got != "Quectel" {
 		t.Fatalf("manufacturer = %#v, want Quectel", got)
 	}
+	// 解析层无型号行时保持占位;接口层由 handleDeviceInfoData 统一
+	// 覆写为硬编码的 deviceModelName。
 	if got := data["modelName"]; got != "-" {
-		t.Fatalf("modelName = %#v, want standalone AT+CGMM to fill it later", got)
+		t.Fatalf("modelName = %#v, want - placeholder before handler override", got)
 	}
 	if got := data["firmwareVersion"]; got != "RG520NEBDGR03A03M4G" {
 		t.Fatalf("firmwareVersion = %#v, want RG520NEBDGR03A03M4G", got)
@@ -1165,6 +1129,194 @@ func TestMockQENGPayloadReplacesDefaultDashboardLines(t *testing.T) {
 	}
 }
 
+func TestMockDashboardDefaultPayloadMatchesRealCPE(t *testing.T) {
+	clearMockATPayload("")
+	data := parseDashboardAT(currentMockDashboardATResponse(pageATCommand(atKeyDashboard)))
+	checks := map[string]string{
+		"sim":              "已激活",
+		"network_provider": "中国电信",
+		"mccmnc":           "46011",
+		"network_mode":     "NR5G-SA FDD",
+		"apn":              "ctnet",
+		"ipv4":             mockWWANIPv4,
+		"ipv6":             mockWWANIPv6,
+		"csq":              "-",
+		"active_sim":       "1",
+		"pcc_pci":          "649",
+		"tac":              "242000 (2367488)",
+		"earfcns":          "428910",
+		"bands":            "N1",
+		"rsrpNR":           "-86",
+		"rsrqNR":           "-11",
+		"sinrNR":           "25",
+		"prxqrsrp":         "-85",
+		"drxqrsrp":         "-86",
+		"rx2qrsrp":         "-86",
+		"rx3qrsrp":         "-83",
+		"temperature":      "41",
+	}
+	for key, want := range checks {
+		if got := stringValue(data[key]); got != want {
+			t.Fatalf("%s = %q, want %q", key, got, want)
+		}
+	}
+	if !strings.Contains(stringValue(data["cellID"]), "24211A484") {
+		t.Fatalf("cellID = %q, want contain 24211A484", data["cellID"])
+	}
+	if data["nr_rx_bytes"] != int64(62817184) || data["nr_tx_bytes"] != int64(45605113) {
+		t.Fatalf("nr counters = (%v, %v), want (62817184, 45605113)", data["nr_rx_bytes"], data["nr_tx_bytes"])
+	}
+	if percentFromAny(data["signalPercentage"]) <= 0 {
+		t.Fatalf("signalPercentage = %v, want > 0", data["signalPercentage"])
+	}
+}
+
+func TestMockATResponseCoversDeviceInfoPage(t *testing.T) {
+	raw := ""
+	for _, command := range pageATCommands(atKeyDeviceInfo) {
+		raw += mockATResponse(command) + "\n"
+	}
+	data := parseDeviceInfoAT(raw)
+	checks := map[string]string{
+		"manufacturer":    "Quectel",
+		"firmwareVersion": mockFirmwareVersion,
+		"imei":            mockIMEI,
+		"imsi":            mockIMSI,
+		"iccid":           mockICCID,
+		"simStatus":       "已插卡",
+		"wwanIpv4":        mockWWANIPv4,
+		"wwanIpv6":        mockWWANIPv6,
+		"lanIp":           "192.168.225.1",
+		"phoneNumber":     "无本机号码",
+	}
+	for key, want := range checks {
+		if got := stringValue(data[key]); got != want {
+			t.Fatalf("%s = %q, want %q", key, got, want)
+		}
+	}
+	if data["simInserted"] != true {
+		t.Fatalf("simInserted = %v, want true", data["simInserted"])
+	}
+}
+
+func TestMockATResponseCoversNetworkSettingsPage(t *testing.T) {
+	raw := ""
+	for _, command := range pageATCommands(atKeyNetworkSettings) {
+		raw += mockATResponse(command) + "\n"
+	}
+	data := parseNetworkSettingsAT(raw)
+	checks := map[string]string{
+		"sim":              "1",
+		"apn":              "ctnet",
+		"pdpType":          "IPV4V6",
+		"prefNetwork":      "AUTO",
+		"nrModeControlNum": "0",
+		"nrModeControl":    "未禁用",
+		"cellLockStatus":   "未锁定",
+		"bands":            "NR5G BAND 1",
+	}
+	for key, want := range checks {
+		if got := stringValue(data[key]); got != want {
+			t.Fatalf("%s = %q, want %q", key, got, want)
+		}
+	}
+	if !strings.Contains(raw, `+CGDCONT: 4,"IPV4V6","sos"`) {
+		t.Fatalf("network settings mock missing sos context: %s", raw)
+	}
+	if !strings.Contains(raw, `+QNWLOCK: "common/5g",0`) {
+		t.Fatalf("network settings mock missing 5g lock status: %s", raw)
+	}
+}
+
+func TestMockATResponseCoversNetworkConfigStatusPage(t *testing.T) {
+	raw := ""
+	for _, command := range pageATCommands(atKeyNetworkConfigStatus) {
+		raw += mockATResponse(command) + "\n"
+	}
+	data := parseNetworkConfigStatusAT(raw)
+	checks := map[string]string{
+		"currentUsbNetMode": "RMNET",
+		"dmzMode":           "0",
+		"lanGwIp":           "192.168.225.1",
+		"lanIpStart":        "20",
+		"lanIpEnd":          "170",
+	}
+	for key, want := range checks {
+		if got := stringValue(data[key]); got != want {
+			t.Fatalf("%s = %q, want %q", key, got, want)
+		}
+	}
+	if data["ipPassStatus"] != false || data["DNSV6ProxyStatus"] != false || data["DNSV4ProxyStatus"] != false {
+		t.Fatalf("proxy statuses = (%v, %v, %v), want all false", data["ipPassStatus"], data["DNSV6ProxyStatus"], data["DNSV4ProxyStatus"])
+	}
+	composite := mockATResponse(pageATCommands(atKeyNetworkConfigStatus)[0])
+	if !strings.Contains(composite, `+QMAP: "MPDN_rule",3,0,0,0,0`) {
+		t.Fatalf("network config status mock missing MPDN lines: %s", composite)
+	}
+	if !strings.HasSuffix(strings.TrimSpace(composite), "ERROR") {
+		t.Fatalf("network config status mock should end with ERROR (DHCPV4DNS unsupported on real firmware): %s", composite)
+	}
+}
+
+func TestMockQNWPREFCFGReturnsRealBandLists(t *testing.T) {
+	// RG520N-CN 已确认的硬件能力频段(固件 ue_capability_band 返回的
+	// 受限子集不代表硬件能力,勿据此修改断言)。
+	raw := mockATResponse(pageATCommand(atKeyNetworkBands))
+	checks := []string{
+		`+QNWPREFCFG: "lte_band",1:3:5:8:34:38:39:40:41`,
+		`+QNWPREFCFG: "nsa_nr5g_band",1:8:28:41:78`,
+		`+QNWPREFCFG: "nr5g_band",1:8:28:41:78`,
+	}
+	for _, want := range checks {
+		if !strings.Contains(raw, want) {
+			t.Fatalf("bands mock missing %q: %s", want, raw)
+		}
+	}
+}
+
+func TestMockSMSListContainsChineseUCS2Message(t *testing.T) {
+	data := parseSMSListAT(mockSMSList(), "ME")
+	messages, ok := data["messages"].([]map[string]any)
+	if !ok || len(messages) != 2 {
+		t.Fatalf("messages = %#v, want 2 entries", data["messages"])
+	}
+	first := messages[0]
+	if stringValue(first["sender"]) != "10001" {
+		t.Fatalf("first sender = %q, want 10001", first["sender"])
+	}
+	// 时区按 15 分钟刻度换算为时:分显示:32 刻度 = +08:00(旧为 +32)。
+	if stringValue(first["date"]) != "26/08/29,14:30:00+08:00" {
+		t.Fatalf("first date = %q, want 26/08/29,14:30:00+08:00", first["date"])
+	}
+	if !strings.Contains(stringValue(first["text"]), "中国电信") {
+		t.Fatalf("first text = %q, want contain 中国电信", first["text"])
+	}
+	if stringValue(messages[1]["text"]) != "SimpleAdmin Windows mock SMS" {
+		t.Fatalf("second text = %q, want SimpleAdmin Windows mock SMS", messages[1]["text"])
+	}
+}
+
+func TestMockATResponseIdentityCommands(t *testing.T) {
+	checks := map[string]string{
+		"ATI":                      "Revision: " + mockModuleRevision,
+		"AT+CGMM":                  mockModuleModel,
+		"AT+CGMI":                  "Quectel",
+		"AT+CGSN":                  mockIMEI,
+		"AT+QGMR":                  mockFirmwareVersion,
+		"AT+CIMI":                  mockIMSI,
+		"AT+ICCID":                 mockICCID,
+		"AT+CPIN?":                 "+CPIN: READY",
+		"AT+CSQ":                   "+CSQ: 99,99",
+		"AT+QNWLOCK=\"common/4g\"": `+QNWLOCK: "common/4g",0`,
+		"AT+QNWLOCK=\"common/5g\"": `+QNWLOCK: "common/5g",0`,
+	}
+	for command, want := range checks {
+		if got := mockATResponse(command); !strings.Contains(got, want) {
+			t.Fatalf("mockATResponse(%q) = %q, want contain %q", command, got, want)
+		}
+	}
+}
+
 func TestSignalPercentageUsesWeightedRsrpRsrqSinr(t *testing.T) {
 	raw := `+QSIMSTAT: 0,1
 +QENG: "servingcell","NOCONN","NR5G-SA","TDD",460,11,94203C105,543,8EB001,627264,78,12,-90,-11,12,1,-
@@ -1353,7 +1505,7 @@ func TestSMSListCommandUsesPDUMode(t *testing.T) {
 func TestParseSMSListPDUModeUCS2KeepsNewlines(t *testing.T) {
 	pdu := buildMockSMSDeliverPDU("+8610001", "第一行\n第二行")
 	raw := fmt.Sprintf("+CMGL: 2,0,,%d\r\n%s\r\nOK\r\n", len(pdu)/2-1, pdu)
-	data := parseSMSListAT(raw)
+	data := parseSMSListAT(raw, "ME")
 	messages := data["messages"].([]map[string]any)
 	if len(messages) != 1 {
 		t.Fatalf("len(messages) = %d, want 1: %#v", len(messages), messages)
@@ -1369,7 +1521,7 @@ func TestParseSMSListPDUModeUCS2KeepsNewlines(t *testing.T) {
 func TestParseSMSListPDUModeUCS2ConvertsCarriageReturnToNewline(t *testing.T) {
 	pdu := buildMockSMSDeliverPDU("+8610001", "第一行\r第二行")
 	raw := fmt.Sprintf("+CMGL: 3,0,,%d\r\n%s\r\nOK\r\n", len(pdu)/2-1, pdu)
-	data := parseSMSListAT(raw)
+	data := parseSMSListAT(raw, "ME")
 	messages := data["messages"].([]map[string]any)
 	if len(messages) != 1 {
 		t.Fatalf("len(messages) = %d, want 1: %#v", len(messages), messages)
@@ -1390,7 +1542,7 @@ func TestNormalizeSMSLineBreaksHandlesUnicodeSeparators(t *testing.T) {
 func TestParseSMSListPDUModeAddsTextLines(t *testing.T) {
 	pdu := buildMockSMSDeliverPDU("+8610001", "第一行\n\n第三行")
 	raw := fmt.Sprintf("+CMGL: 4,0,,%d\r\n%s\r\nOK\r\n", len(pdu)/2-1, pdu)
-	data := parseSMSListAT(raw)
+	data := parseSMSListAT(raw, "ME")
 	messages := data["messages"].([]map[string]any)
 	if len(messages) != 1 {
 		t.Fatalf("len(messages) = %d, want 1: %#v", len(messages), messages)
@@ -1413,100 +1565,50 @@ func TestNormalizeSMSLineBreaksHandlesLiteralEscapesAndVerticalSeparators(t *tes
 	}
 }
 
-func TestBuildSMSSubmitPDUsUsesPDUCMGSLength(t *testing.T) {
-	segments := buildSMSSubmitPDUs("+8613800138000", "测试短信", 9)
-	if len(segments) != 1 {
-		t.Fatalf("len(segments) = %d, want 1", len(segments))
+// 发送命令必须是电信定制固件的厂商文本模式:标准 PDU 模式在本固件被
+// 网络侧拒绝(+CMS ERROR: 350),厂商流程为 2026-08-24 实机验证的成功路径。
+func TestBuildSMSVendorSendCommandFormat(t *testing.T) {
+	cmd := buildSMSVendorSendCommand("+8613800138000", 9, 1, 1)
+	wantNumber := encodeUCS2("+8613800138000")
+	if !strings.Contains(cmd, fmt.Sprintf(`+CMGS="%s",9,1,1`, wantNumber)) {
+		t.Fatalf("missing vendor CMGS triple with UCS2 number: %q", cmd)
 	}
-	if !strings.HasPrefix(segments[0].PDUHex, "00") {
-		t.Fatalf("PDUHex = %q, want SMSC length prefix 00", segments[0].PDUHex)
+	for _, init := range []string{"AT+CMEE=1", "+CSMS=1", "+CMGF=1", `+CSCS="UCS2"`, "+CSDH=0", "+CSMP=17,167,0,8", "+CNMI=2,1,0,0,0", `+CPMS="ME","ME","ME"`} {
+		if !strings.Contains(cmd, init) {
+			t.Fatalf("missing init command %q in %q", init, cmd)
+		}
 	}
-	if got, want := segments[0].TPDUOctets, len(segments[0].PDUHex)/2-1; got != want {
-		t.Fatalf("TPDUOctets = %d, want %d", got, want)
+	if strings.Contains(cmd, "+CMGF=0") || strings.Contains(cmd, "CMGF=0") {
+		t.Fatalf("vendor send must not switch to PDU mode: %q", cmd)
 	}
-}
-
-func TestParseModelATSupportsPlainCGMMResponse(t *testing.T) {
-	raw := "AT+CGMM\r\nRG520N-EB\r\n\r\nOK\r\n"
-	if got := parseModelAT(raw); got != "RG520N-EB" {
-		t.Fatalf("parseModelAT = %q, want RG520N-EB", got)
-	}
-}
-
-func TestCGMMBypassesStartupReadDelay(t *testing.T) {
-	if !isATImmediateReadCommand(`AT+CGMM`) {
-		t.Fatalf("AT+CGMM should bypass startup read delay")
-	}
-	if isATImmediateReadCommand(`AT+CGSN`) {
-		t.Fatalf("AT+CGSN should not bypass startup read delay")
+	// 号码必须是 UCS2 十六进制,不能出现原始数字形态。
+	if strings.Contains(cmd, `"+8613800138000"`) {
+		t.Fatalf("number must be UCS2-encoded, got raw digits: %q", cmd)
 	}
 }
 
-func TestParseModelATSupportsCGMMPrefix(t *testing.T) {
-	raw := "AT+CGMM\r\n+CGMM: RG520N-EB\r\n\r\nOK\r\n"
-	if got := parseModelAT(raw); got != "RG520N-EB" {
-		t.Fatalf("parseModelAT = %q, want RG520N-EB", got)
+// 短号(如 10001)同样按厂商形态发送:不加国家码、整体 UCS2 编码。
+func TestBuildSMSVendorSendCommandShortCode(t *testing.T) {
+	cmd := buildSMSVendorSendCommand("10001", 7, 1, 1)
+	if !strings.Contains(cmd, fmt.Sprintf(`+CMGS="%s",7,1,1`, encodeUCS2("10001"))) {
+		t.Fatalf("short code vendor CMGS wrong: %q", cmd)
 	}
 }
 
-func TestParseModelATSupportsQuotedCGMMPrefix(t *testing.T) {
-	raw := "AT+CGMM\r\n+CGMM: \"RG520N-EB\"\r\n\r\nOK\r\n"
-	if got := parseModelAT(raw); got != "RG520N-EB" {
-		t.Fatalf("parseModelAT = %q, want RG520N-EB", got)
+// 型号已硬编码为 RG520N-CN:所有页面 AT 命令集与周期刷新集合
+// 都不应再包含 CGMM 查询。
+func TestNoPageATCommandQueriesModel(t *testing.T) {
+	for _, key := range []string{atKeyDashboard, atKeyDeviceInfo, atKeyNetworkBands, atKeyNetworkSettings, atKeyNetworkConfigStatus, atKeySystemStatus, atKeySIMStatus, atKeySMSList, atKeyIMSI} {
+		for _, command := range pageATCommands(key) {
+			if strings.Contains(command, "+CGMM") {
+				t.Fatalf("page %s command contains CGMM: %q", key, command)
+			}
+		}
 	}
-}
-
-func TestModelCommandUsesStandaloneCGMMOnly(t *testing.T) {
-	command := pageATCommand(atKeyModel)
-	if command != `AT+CGMM` {
-		t.Fatalf("model command = %q, want AT+CGMM", command)
-	}
-	if strings.Contains(pageATCommand(atKeyDeviceInfo), "+CGMM") {
-		t.Fatalf("device info command = %q, model must be queried by standalone AT+CGMM only", pageATCommand(atKeyDeviceInfo))
-	}
-	standaloneCGMM := 0
 	for _, command := range commonATCacheCommands() {
-		if strings.Contains(command, "+GMM") || strings.Contains(command, "AT+GMM") {
-			t.Fatalf("common AT cache command still contains GMM: %q", command)
+		if strings.Contains(command, "+CGMM") {
+			t.Fatalf("common AT cache command contains CGMM: %q", command)
 		}
-		if strings.Contains(command, "+CGMM") && command != `AT+CGMM` {
-			t.Fatalf("common AT cache command combines CGMM with other commands: %q", command)
-		}
-		if command == `AT+CGMM` {
-			standaloneCGMM++
-		}
-	}
-	if standaloneCGMM != 0 {
-		t.Fatalf("standalone AT+CGMM cache commands = %d, want 0; model is fetched only on demand and then cached", standaloneCGMM)
-	}
-}
-
-func TestFetchStandaloneModelUsesRuntimeCacheBeforeAT(t *testing.T) {
-	s := &simpleAdminServer{}
-	s.storeStandaloneModel("RG520N-EB")
-
-	model, pending := s.fetchStandaloneModel(true)
-	if model != "RG520N-EB" || pending {
-		t.Fatalf("fetchStandaloneModel = (%q, %v), want cached RG520N-EB and pending=false", model, pending)
-	}
-}
-
-func TestStandaloneModelCommandNotPeriodicallyRefreshed(t *testing.T) {
-	mgr := &atCommandCacheManager{
-		entries: map[string]*atCacheEntry{
-			`AT+CGMM`: {command: `AT+CGMM`, response: "RG520N-EB", updatedAt: time.Now().Add(-24 * time.Hour)},
-			`AT+CGMI`: {command: `AT+CGMI`, response: "Quectel", updatedAt: time.Now().Add(-24 * time.Hour)},
-		},
-	}
-
-	commands := mgr.cachedReadCommandsNeedingRefresh()
-	for _, command := range commands {
-		if command == `AT+CGMM` {
-			t.Fatalf("cachedReadCommandsNeedingRefresh includes AT+CGMM: %#v", commands)
-		}
-	}
-	if len(commands) != 1 || commands[0] != `AT+CGMI` {
-		t.Fatalf("cachedReadCommandsNeedingRefresh = %#v, want only AT+CGMI", commands)
 	}
 }
 
@@ -1528,15 +1630,16 @@ func TestCacheMaxAgesClassifyStableConfigQueries(t *testing.T) {
 	if got := maxAgeForATCacheCommand(commands[0]); got != atCacheConfigMaxAge {
 		t.Fatalf("network bands maxAge = %s, want %s", got, atCacheConfigMaxAge)
 	}
-	settings := pageATCommands(atKeySettingsStatus)
+	settings := pageATCommands(atKeyNetworkConfigStatus)
 	if got := maxAgeForATCacheCommand(settings[0]); got != atCacheConfigMaxAge {
-		t.Fatalf("settings status config maxAge = %s, want %s", got, atCacheConfigMaxAge)
+		t.Fatalf("network config status config maxAge = %s, want %s", got, atCacheConfigMaxAge)
 	}
-	if got := maxAgeForATCacheCommand(settings[1]); got != atCacheStaticMaxAge {
-		t.Fatalf("settings IMEI maxAge = %s, want %s", got, atCacheStaticMaxAge)
+	if got := maxAgeForATCacheCommand(settings[1]); got != atCacheConfigMaxAge {
+		t.Fatalf("network config LANIP maxAge = %s, want %s", got, atCacheConfigMaxAge)
 	}
-	if got := maxAgeForATCacheCommand(settings[2]); got != atCacheConfigMaxAge {
-		t.Fatalf("LANIP maxAge = %s, want %s", got, atCacheConfigMaxAge)
+	system := pageATCommands(atKeySystemStatus)
+	if got := maxAgeForATCacheCommand(system[0]); got != atCacheStaticMaxAge {
+		t.Fatalf("system IMEI maxAge = %s, want %s", got, atCacheStaticMaxAge)
 	}
 	networkSettings := pageATCommands(atKeyNetworkSettings)
 	if got := maxAgeForATCacheCommand(networkSettings[0]); got != atCacheSemiStaticMaxAge {

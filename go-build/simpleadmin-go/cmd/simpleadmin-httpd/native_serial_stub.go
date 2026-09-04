@@ -33,7 +33,7 @@ func readTTYUntilTokens(f *os.File, maxDuration time.Duration, terminalTokens ..
 	return "", fmt.Errorf("native serial reads are only available on Linux module builds")
 }
 
-func readATSessionUntilTokens(session *atCommandSession, maxDuration time.Duration, terminalTokens ...string) (string, error) {
+func readATSessionUntilTokens(session *atCommandSession, maxDuration time.Duration, echoMarker string, terminalTokens ...string) (string, error) {
 	return "", fmt.Errorf("native AT reads are only available on Linux module builds")
 }
 
@@ -42,6 +42,8 @@ func lockGlobalATFile() (func(), error) { return func() {}, nil }
 func shouldRecoverBusyATDevice(device string, err error) bool { return false }
 
 func recoverBusyATDevices() {}
+
+func markATSessionDirty(session *atCommandSession) {}
 
 func runSMDReaderCommand(args []string) {
 	fmt.Fprintln(os.Stderr, "smd reader helper is only available on Linux module builds")

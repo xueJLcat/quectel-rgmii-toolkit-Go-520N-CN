@@ -6,7 +6,6 @@ package main
 import (
 	"fmt"
 	"os"
-	"path/filepath"
 	"strconv"
 	"strings"
 )
@@ -24,7 +23,8 @@ func runTTLCommand(args []string) {
 			fmt.Println(err)
 			os.Exit(1)
 		}
-		printLines(applyNativeTTL(value, false))
+		lines, _ := applyNativeTTL(value, false)
+		printLines(lines)
 	case "off", "stop":
 		printLines(setNativeTTL(0))
 	case "status":
@@ -45,28 +45,39 @@ func printLines(lines []string) {
 func applySavedTTLAtStartup() {}
 
 func setNativeTTL(value int) []string {
-	logs := applyNativeTTL(value, true)
-	if err := writeTTLValue(value); err != nil {
-		logs = append(logs, "failed to write ttlvalue: "+err.Error())
-	}
+	logs, _ := setNativeTTLWithStatus(value)
 	return logs
 }
 
-func applyNativeTTL(value int, persistLog bool) []string {
+// setNativeTTLWithStatus 与 setNativeTTL 相同,但额外返回规则是否成功应用
+// 并持久化,供 HTTP 接口如实上报成败。
+func setNativeTTLWithStatus(value int) ([]string, bool) {
+	logs, applied := applyNativeTTL(value, true)
+	if !applied {
+		return logs, false
+	}
+	if err := writeTTLValue(value); err != nil {
+		logs = append(logs, "failed to write ttlvalue: "+err.Error())
+		return logs, false
+	}
+	return logs, true
+}
+
+func applyNativeTTL(value int, persistLog bool) ([]string, bool) {
 	logs := []string{"Windows local test mode: TTL rules are simulated only"}
 	if value <= 0 {
 		logs = append(logs, "TTL disabled")
-		return logs
+		return logs, true
 	}
 	logs = append(logs, fmt.Sprintf("TTL mock enabled with value: %d", value))
 	if persistLog {
 		logs = append(logs, "TTL value saved")
 	}
-	return logs
+	return logs, true
 }
 
-func removeNativeTTLRules() []string {
-	return []string{"Windows local test mode: no kernel TTL rules to remove"}
+func removeNativeTTLRules() ([]string, bool) {
+	return []string{"Windows local test mode: no kernel TTL rules to remove"}, true
 }
 
 func managedTTLDeleteArgs(ruleLine, target, setFlag string) ([]string, bool) {
@@ -111,15 +122,11 @@ func readTTLValue() (int, error) {
 	return value, nil
 }
 
+// writeTTLValue 原子写入 TTL 状态文件(与 linux 实现同一约定):
+// 直接覆写遇掉电可能留下截断内容,重启后按非法值拒绝恢复规则。
 func writeTTLValue(value int) error {
 	if value < 0 || value > 255 {
 		return fmt.Errorf("invalid TTL value: %d", value)
 	}
-	dir := filepath.Dir(runtimeTTLValueFile)
-	if dir != "." {
-		if err := os.MkdirAll(dir, 0755); err != nil {
-			return err
-		}
-	}
-	return os.WriteFile(runtimeTTLValueFile, []byte(strconv.Itoa(value)+"\n"), 0644)
+	return atomicWriteFile(runtimeTTLValueFile, []byte(strconv.Itoa(value)+"\n"), 0644)
 }

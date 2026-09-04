@@ -1,0 +1,5 @@
+# 本地构建产物(发布产物以 development/ 与 windows-test/bin/ 为准)
+/go-build/simpleadmin-go/simpleadmin-httpd
+/go-build/simpleadmin-go/simpleadmin-httpd.exe
+/go-build/simpleadmin-go/cmd/simpleadmin-httpd/simpleadmin-httpd
+/go-build/simpleadmin-go/cmd/simpleadmin-httpd/simpleadmin-httpd.exe

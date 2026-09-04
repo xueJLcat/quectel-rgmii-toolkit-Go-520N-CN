@@ -63,7 +63,6 @@ function getStaticNetworkInfo() {
     lastUpdate: new Date().toLocaleString(),
     newRefreshRate: null,
     refreshRate: 2,
-    intervalId: null,
     uptime: '未知',
     _uptimeParts: null,
     nr_rx_bytes: 0,
@@ -75,22 +74,25 @@ function getStaticNetworkInfo() {
     _prev_nr_rx: null,
     _prev_nr_tx: null,
     _prev_nr_t: null,
-    sensitiveVisible: SimpleAdmin.Mask.getSensitiveVisible(),
     compactNetworkInfo: readNetworkCompactState(),
+    dashboardLoaded: false,
+    updateFailed: false,
+    dataError: '',
+    dataPending: false,
+    historyPoints: [],
     _dashboardActive: false,
+    _dashboardFetchInFlight: false,
+    _dashboardFetchSeq: 0,
+    _dashboardFetchPromise: null,
+    _mainPoll: null,
+    _historyPoll: null,
+    _pushRefreshTimer: null,
     _dashboardPageChangeHandler: null,
+    _atCacheUpdatedHandler: null,
 
     toggleNetworkCompact() {
       this.compactNetworkInfo = !this.compactNetworkInfo;
       saveNetworkCompactState(this.compactNetworkInfo);
-    },
-
-    toggleSensitiveVisible() {
-      this.sensitiveVisible = SimpleAdmin.Mask.setSensitiveVisible(!this.sensitiveVisible);
-    },
-
-    formatSensitiveValue(value, type) {
-      return SimpleAdmin.Mask.format(this.sensitiveVisible, value, type);
     },
 
     formatActiveSimStatus() {
@@ -137,27 +139,146 @@ function getStaticNetworkInfo() {
       return this.t('获取中...');
     },
 
+    isDashboardPageActive() {
+      if (!window.SimpleAdminSpaMode) return true;
+      const section = document.querySelector('.sa-page[data-page="dashboard"]');
+      return !!(section && section.classList.contains('active'));
+    },
+
     fetchNetworkInfo() {
       if (!this._dashboardActive || !this.isDashboardPageActive()) {
         this.stopDashboardRefresh();
-        return;
+        return Promise.resolve();
       }
-      SimpleAdmin.Api.getDashboardData({})
+      if (this._dashboardFetchInFlight) return this._dashboardFetchPromise || Promise.resolve();
+      this._dashboardFetchInFlight = true;
+      this._dashboardFetchSeq += 1;
+      const seq = this._dashboardFetchSeq;
+      this._dashboardFetchPromise = SimpleAdmin.Api.getDashboardData({})
         .then((data) => {
+          this._dashboardFetchInFlight = false;
+          this._dashboardFetchPromise = null;
+          if (seq !== this._dashboardFetchSeq) return;
           if (!this._dashboardActive || !this.isDashboardPageActive()) return;
+          this.updateFailed = false;
           this.applyDashboardData(data || {});
-          if (data && data.uptimeParts) {
+          if (data && !data.pending && data.uptimeParts) {
             this.setUptimeParts(data.uptimeParts);
           }
         })
         .catch((err) => {
+          this._dashboardFetchInFlight = false;
+          this._dashboardFetchPromise = null;
+          if (seq !== this._dashboardFetchSeq) return;
           if (!this._dashboardActive || !this.isDashboardPageActive()) return;
           console.error('dashboard_data error:', err);
-          this.lastUpdate = new Date().toLocaleString();
+          if (!this.updateFailed) {
+            this.updateFailed = true;
+            SimpleAdmin.UI.notify('danger', this.t('数据更新失败'));
+          }
+          throw err;
+        });
+      return this._dashboardFetchPromise;
+    },
+
+    fetchHistory() {
+      if (!SimpleAdmin.Api.historyData) return Promise.resolve();
+      return SimpleAdmin.Api.historyData()
+        .then((data) => {
+          if (!this._dashboardActive) return;
+          this.historyPoints = Array.isArray(data && data.points) ? data.points : [];
+        })
+        .catch((err) => {
+          if (!this._dashboardActive) return;
+          console.error('history_data error:', err);
+          throw err;
         });
     },
 
+    createMainPoll(immediate) {
+      return SimpleAdmin.Poll.create({
+        tick: () => this.fetchNetworkInfo(),
+        interval: this.refreshRate * 1000,
+        immediate: immediate,
+        pauseWhenHidden: true
+      });
+    },
+
+    startDashboardRefresh() {
+      if (!this.isDashboardPageActive()) return;
+      const wasActive = this._dashboardActive;
+      this._dashboardActive = true;
+      if (wasActive) return;
+      if (this._mainPoll) this._mainPoll.stop();
+      this._mainPoll = this.createMainPoll(true);
+      this._mainPoll.start();
+      if (!this._historyPoll) {
+        this._historyPoll = SimpleAdmin.Poll.create({
+          tick: () => this.fetchHistory(),
+          interval: 60 * 1000,
+          immediate: true,
+          pauseWhenHidden: true
+        });
+      }
+      this._historyPoll.start();
+    },
+
+    stopDashboardRefresh() {
+      this._dashboardActive = false;
+      if (this._mainPoll) this._mainPoll.stop();
+      if (this._historyPoll) this._historyPoll.stop();
+    },
+
+    historySignalPoints() {
+      const points = this.historyPoints;
+      if (points.length < 2) return '';
+      const width = 600;
+      const height = 120;
+      const pad = 6;
+      const step = (width - pad * 2) / (points.length - 1);
+      const coords = points.map((point, index) => {
+        const value = Math.max(0, Math.min(100, Number(point.sig) || 0));
+        const x = pad + index * step;
+        const y = height - pad - (value / 100) * (height - pad * 2);
+        return `${x.toFixed(1)},${y.toFixed(1)}`;
+      });
+      return coords.join(' ');
+    },
+
+    historyLatestSignal() {
+      const points = this.historyPoints;
+      if (!points.length) return '-';
+      const value = Number(points[points.length - 1].sig) || 0;
+      return `${value}%`;
+    },
+
+    historyLatestRxRate() {
+      const points = this.historyPoints;
+      if (!points.length) return '-';
+      return this.humanBytesPerSec(Number(points[points.length - 1].rxr) || 0);
+    },
+
+    historyLatestTxRate() {
+      const points = this.historyPoints;
+      if (!points.length) return '-';
+      return this.humanBytesPerSec(Number(points[points.length - 1].txr) || 0);
+    },
+
+    historyTimeRange() {
+      const points = this.historyPoints;
+      if (points.length < 2) return '-';
+      const fmt = (ts) => {
+        const date = new Date(ts * 1000);
+        return `${String(date.getHours()).padStart(2, '0')}:${String(date.getMinutes()).padStart(2, '0')}`;
+      };
+      return `${fmt(points[0].t)} - ${fmt(points[points.length - 1].t)}`;
+    },
+
     applyDashboardData(data) {
+      this.dataPending = !!data.pending;
+      this.dataError = (!data.pending && data.error) ? String(data.error) : '';
+      if (data.pending === true) return;
+      if (this.dataError) return;
       const textKeys = [
         'sim', 'temperature', 'active_sim', 'network_provider', 'mccmnc', 'apn',
         'network_mode', 'ipv4', 'ipv6', 'bands', 'bandwidth', 'prxqrsrp',
@@ -187,6 +308,8 @@ function getStaticNetworkInfo() {
 
       this.updateTraffic(data);
       this.lastUpdate = data.lastUpdate || new Date().toLocaleString();
+      SimpleAdmin.UI.setText('#dashboardLastUpdate', this.lastUpdate);
+      this.dashboardLoaded = true;
     },
 
     updateTraffic(data) {
@@ -213,61 +336,6 @@ function getStaticNetworkInfo() {
       this._prev_nr_rx = rx;
       this._prev_nr_tx = tx;
       this._prev_nr_t = now;
-    },
-
-    resetNetworkInfo() {
-      this.applyDashboardData({
-        sim: '未激活',
-        active_sim: '-',
-        network_provider: '-',
-        mccmnc: '-',
-        apn: '-',
-        network_mode: '未插卡',
-        ipv4: '-',
-        ipv6: '-',
-        bands: '-',
-        bandwidth: '-',
-        prxqrsrp: '-',
-        drxqrsrp: '-',
-        rx2qrsrp: '-',
-        rx3qrsrp: '-',
-        earfcns: '-',
-        pcc_pci: '-',
-        scc_pci: '-',
-        signalAssessment: '未知',
-        csq: '-',
-        rssi: '-',
-        cellID: '-',
-        eNBID: '-',
-        tac: '-',
-        rsrqLTE: '-',
-        rsrqNR: '-',
-        rsrpLTE: '-',
-        rsrpNR: '-',
-        sinrLTE: '-',
-        sinrNR: '-',
-        internetConnection: '未连接',
-        nr_rx_human: '-',
-        nr_tx_human: '-',
-        ramUsedHuman: '-',
-        ramTotalHuman: '-',
-        rsrqLTEPercentage: 0,
-        rsrqNRPercentage: 0,
-        rsrpLTEPercentage: 0,
-        rsrpNRPercentage: 0,
-        sinrLTEPercentage: 0,
-        sinrNRPercentage: 0,
-        signalPercentage: 0,
-        cpuUsagePercent: 0,
-        ramUsagePercent: 0,
-        nr_rx_bytes: 0,
-        nr_tx_bytes: 0
-      });
-      this.nr_dl_speed = '-';
-      this.nr_ul_speed = '-';
-      this._prev_nr_rx = null;
-      this._prev_nr_tx = null;
-      this._prev_nr_t = null;
     },
 
     humanBytes(bytes) {
@@ -334,104 +402,97 @@ function getStaticNetworkInfo() {
       this.uptime = this.formatUptimeParts(parts);
     },
 
+    readRefreshRateInput() {
+      const input = document.getElementById('dashboardRefreshRateInput');
+      if (input) return input.value;
+      return this.newRefreshRate;
+    },
+
     updateRefreshRate() {
-      const value = Number(this.newRefreshRate);
-      this.refreshRate = Number.isFinite(value) ? Math.max(2, Math.min(60, value)) : this.refreshRate;
-      localStorage.setItem('refreshRate', String(this.refreshRate));
+      const raw = this.readRefreshRateInput();
+      if (raw === null || String(raw).trim() === '') return;
+      const value = Number(raw);
+      if (!Number.isFinite(value)) return;
+      this.refreshRate = Math.max(2, Math.min(60, value));
+      this.newRefreshRate = null;
+      try {
+        localStorage.setItem('refreshRate', String(this.refreshRate));
+      } catch (err) {
+        // Ignore unavailable localStorage so the page can still work in restricted browsers.
+      }
+      const input = document.getElementById('dashboardRefreshRateInput');
+      if (input) {
+        input.value = '';
+        input.placeholder = `${this.refreshRate}s`;
+      }
       if (this._dashboardActive && this.isDashboardPageActive()) {
-        this.startInterval();
+        if (this._mainPoll) this._mainPoll.stop();
+        this._mainPoll = this.createMainPoll(false);
+        this._mainPoll.start();
       }
     },
 
-    isDashboardPageActive() {
-      if (!window.SimpleAdminSpaMode) return true;
-      const section = document.querySelector('.sa-page[data-page="dashboard"]');
-      return !!(section && section.classList.contains('active'));
-    },
-
-    startDashboardRefresh() {
-      if (!this.isDashboardPageActive()) return;
-      const wasActive = this._dashboardActive;
-      this._dashboardActive = true;
-      if (!wasActive) {
-        this.tickOnce();
+    bindTitlebarControls() {
+      const input = document.getElementById('dashboardRefreshRateInput');
+      const applyButton = document.getElementById('dashboardRefreshRateApply');
+      if (input) {
+        input.placeholder = `${this.refreshRate}s`;
+        input.addEventListener('keydown', (event) => {
+          if (event.key === 'Enter') {
+            event.preventDefault();
+            this.updateRefreshRate();
+          }
+        });
       }
-      this.startInterval();
-    },
-
-    stopDashboardRefresh() {
-      this._dashboardActive = false;
-      if (this.intervalId) {
-        clearInterval(this.intervalId);
-        this.intervalId = null;
+      if (applyButton) {
+        applyButton.addEventListener('click', () => this.updateRefreshRate());
       }
+      SimpleAdmin.UI.setText('#dashboardLastUpdate', this.lastUpdate);
     },
 
     init() {
-      const stored = Number(localStorage.getItem('refreshRate'));
-      if (Number.isFinite(stored) && stored >= 2) {
-        this.refreshRate = stored;
+      let stored = NaN;
+      try {
+        stored = Number(localStorage.getItem('refreshRate'));
+      } catch (err) {
+        // Ignore unavailable localStorage so the page can still work in restricted browsers.
       }
+      if (Number.isFinite(stored) && stored >= 2) {
+        // 与 updateRefreshRate 的保存钳制保持一致,防止手改 localStorage
+        // 留下超范围值导致轮询间隔异常。
+        this.refreshRate = Math.max(2, Math.min(60, stored));
+      }
+      this.bindTitlebarControls();
       window.addEventListener('simpleadmin:language-changed', () => {
         this.uptime = this._uptimeParts ? this.formatUptimeParts(this._uptimeParts) : this.t('未知时间');
       });
+      SimpleAdmin.Poll.onPageReturn('dashboard', () => this.startDashboardRefresh());
       this._dashboardPageChangeHandler = (event) => {
-        if (event && event.detail && event.detail.page === 'dashboard') {
-          this.startDashboardRefresh();
-        } else {
+        if (!(event && event.detail && event.detail.page === 'dashboard')) {
           this.stopDashboardRefresh();
         }
       };
       if (window.SimpleAdminSpaMode) {
         window.addEventListener('simpleadmin:page-changed', this._dashboardPageChangeHandler);
       }
+      this._atCacheUpdatedHandler = () => {
+        if (!this._dashboardActive || !this.isDashboardPageActive()) return;
+        if (this._pushRefreshTimer) return;
+        this._pushRefreshTimer = setTimeout(() => {
+          this._pushRefreshTimer = null;
+          this.fetchNetworkInfo();
+        }, 800);
+      };
+      window.addEventListener('simpleadmin:at_cache_updated', this._atCacheUpdatedHandler);
       this.startDashboardRefresh();
       window.addEventListener('beforeunload', () => {
         this.stopDashboardRefresh();
+        window.removeEventListener('simpleadmin:at_cache_updated', this._atCacheUpdatedHandler);
+        if (this._pushRefreshTimer) {
+          clearTimeout(this._pushRefreshTimer);
+          this._pushRefreshTimer = null;
+        }
       }, { once: true });
-    },
-
-    startInterval() {
-      if (this.intervalId) clearInterval(this.intervalId);
-      if (!this._dashboardActive || !this.isDashboardPageActive()) {
-        this.stopDashboardRefresh();
-        return;
-      }
-      this.intervalId = setInterval(() => this.tickOnce(), this.refreshRate * 1000);
-    },
-
-    tickOnce() {
-      if (!this._dashboardActive || !this.isDashboardPageActive()) {
-        this.stopDashboardRefresh();
-        return;
-      }
-      this.fetchNetworkInfo();
-    },
-
-    fetchUpTime() {
-      return SimpleAdmin.Api.getUptime()
-        .then((response) => response.text())
-        .then((data) => this.setUptimeParts(this.parseUptimeParts(data)))
-        .catch(() => this.setUptimeParts(null));
-    },
-
-    requestPing() {
-      return SimpleAdmin.Api.getPing().then((response) => response.text());
-    },
-
-    requestPingWithTimeout(timeout = 5000) {
-      return new Promise((resolve, reject) => {
-        const timer = setTimeout(() => reject(new Error('Ping request timed out')), timeout);
-        this.requestPing()
-          .then((res) => {
-            clearTimeout(timer);
-            resolve(res);
-          })
-          .catch((err) => {
-            clearTimeout(timer);
-            reject(err);
-          });
-      });
     }
   };
 }

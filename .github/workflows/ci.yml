@@ -1,0 +1,50 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  build:
+    name: Build & Test
+    runs-on: ubuntu-latest
+    steps:
+      - name: 检出代码
+        uses: actions/checkout@v4
+
+      - name: 安装 Go（版本取自 go.mod）
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go-build/simpleadmin-go/go.mod
+          cache: false
+
+      - name: 安装 Node（前端模块装配冒烟测试用）
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: 格式检查、静态分析与单元测试
+        run: make fmt-check vet test
+
+      - name: 前端样式构建一致性检查（Tailwind）
+        run: make css-check
+
+      - name: 前端模块装配冒烟测试
+        run: make smoke
+
+      - name: 交叉编译 ARM 与 Windows 产物
+        run: make all
+
+      - name: 上传 ARM 产物
+        uses: actions/upload-artifact@v4
+        with:
+          name: simpleadmin-httpd-armv7
+          path: development/simpleadmin/simpleadmin-httpd.armv7
+          if-no-files-found: error
+
+      - name: 上传 Windows 产物
+        uses: actions/upload-artifact@v4
+        with:
+          name: simpleadmin-httpd-windows-amd64
+          path: windows-test/bin/simpleadmin-httpd-windows-amd64.exe
+          if-no-files-found: error

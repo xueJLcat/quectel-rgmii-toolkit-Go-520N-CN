@@ -12,8 +12,11 @@
     var source = typeof factory === 'function' ? factory() : (factory || {});
     var data = {};
     var methods = {};
+    var computed = source.computed && typeof source.computed === 'object' ? source.computed : {};
+    var watch = source.watch && typeof source.watch === 'object' ? source.watch : {};
 
     Object.keys(source).forEach(function (key) {
+      if (key === 'computed' || key === 'watch') return;
       if (typeof source[key] === 'function') {
         methods[key] = source[key];
       } else {
@@ -26,6 +29,8 @@
         return data;
       },
       methods: methods,
+      computed: computed,
+      watch: watch,
       mounted: function () {
         if (typeof this.init === 'function') {
           this.init();

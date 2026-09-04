@@ -8,11 +8,6 @@ import (
 	"unicode/utf16"
 )
 
-type smsPDUOutgoing struct {
-	PDUHex     string
-	TPDUOctets int
-}
-
 type smsPDUDecoded struct {
 	ServiceCenter string
 	Sender        string
@@ -23,37 +18,83 @@ type smsPDUDecoded struct {
 	ConcatSeq     int
 }
 
-func buildSMSSubmitPDUs(number string, message string, ref int) []smsPDUOutgoing {
-	segments := splitSMSRunes(message, 67)
-	if len(segments) == 0 {
-		return nil
-	}
-	if ref <= 0 {
-		ref = 1
-	}
-	out := make([]smsPDUOutgoing, 0, len(segments))
-	digits := stripNonDigits(number)
-	if digits == "" {
-		return nil
-	}
-	toa := byte(0x81)
-	if strings.HasPrefix(strings.TrimSpace(number), "+") {
-		toa = 0x91
-	}
-	encodedNumber := encodePDUPhoneNumber(digits)
-	for i, segment := range segments {
-		firstOctet := byte(0x11)
-		userData := encodeUCS2(segment)
-		if len(segments) > 1 {
-			firstOctet = 0x51
-			udh := fmt.Sprintf("050003%02X%02X%02X", ref&0xFF, len(segments), i+1)
-			userData = udh + userData
-		}
-		udOctets := len(userData) / 2
-		tpdu := fmt.Sprintf("%02X00%02X%02X%s0008AA%02X%s", firstOctet, len(digits), toa, encodedNumber, udOctets, userData)
-		out = append(out, smsPDUOutgoing{PDUHex: "00" + tpdu, TPDUOctets: len(tpdu) / 2})
+// smsVendorSegmentUnits 是厂商文本模式单段正文的 UTF-16 码元上限。
+// 文本模式无 UDH 开销,长短信重组由固件按 uid/seq/total 自行完成,
+// 单段可承载完整 70 码元(140 字节)。
+const smsVendorSegmentUnits = 70
+
+// splitSMSVendorSegments 按 UTF-16 码元切分正文(每段 70 码元),
+// 返回每段的 UCS2 大端十六进制串;代理对不被拆到两段。
+// UCS2 分段必须按码元计算:emoji 等增补字符占 2 个码元,按 rune 切分
+// 会让单段超出上限。
+func splitSMSVendorSegments(message string) []string {
+	segments := splitSMSUTF16Units(message, smsVendorSegmentUnits, smsVendorSegmentUnits)
+	out := make([]string, 0, len(segments))
+	for _, units := range segments {
+		out = append(out, encodeUCS2Units(units))
 	}
 	return out
+}
+
+// buildSMSVendorSendCommand 拼装电信定制固件的文本模式发送命令(实机验证流程,
+// 见 03-at-interface.md 与历史工具 cpe_sms.sh;标准 PDU 模式在本固件被拒绝,
+// 返回 +CMS ERROR: 350)。初始化序列必须随每次发送执行:
+//   - +CSMS=1/+CMGF=1/+CSCS="UCS2" 缺一即命令形态错误;
+//   - +CSMP=17,167,0,8 为文本模式提交参数;
+//   - +CMGS 必须携带厂商三元组 "<号码的UCS2十六进制>",uid,seq,total,
+//     缺三元组报 CMS 305,号码不做 UCS2 编码报 304/ERROR。
+//
+// 报文体在 "> " 提示符后写入(正文 UCS2 十六进制 + Ctrl-Z,见 runSMSTransaction)。
+// 长短信各段共用同一 uid,seq 从 1 递增,固件据此重组。
+func buildSMSVendorSendCommand(number string, uid, seq, total int) string {
+	return fmt.Sprintf(`AT+CMEE=1;+CSMS=1;+CMGF=1;+CSCS="UCS2";+CSDH=0;+CSMP=17,167,0,8;+CNMI=2,1,0,0,0;+CPMS="ME","ME","ME";+CMGS="%s",%d,%d,%d`,
+		encodeUCS2(number), uid, seq, total)
+}
+
+// splitSMSUTF16Units 按 UTF-16 码元切分短信正文。总长不超过 singleLimit
+// 时整体作为单段;否则按 multiLimit 分段,且避免把代理对拆到两段。
+func splitSMSUTF16Units(message string, singleLimit, multiLimit int) [][]uint16 {
+	units := utf16.Encode([]rune(message))
+	if len(units) == 0 {
+		return nil
+	}
+	if singleLimit <= 0 {
+		singleLimit = 70
+	}
+	if multiLimit <= 0 {
+		multiLimit = 67
+	}
+	if len(units) <= singleLimit {
+		return [][]uint16{units}
+	}
+	segments := [][]uint16{}
+	for len(units) > 0 {
+		end := multiLimit
+		if len(units) < end {
+			end = len(units)
+		}
+		// 不把高代理项单独留在段尾,避免产生孤立代理码元。
+		if end < len(units) && end > 0 && units[end-1] >= 0xD800 && units[end-1] <= 0xDBFF {
+			end--
+		}
+		if end <= 0 {
+			// 退化分段参数(如 multiLimit==1 且段首为高代理项)下回退会
+			// 产生空段且不消耗输入,形成死循环;兜底保证每段至少前进一个码元。
+			end = 1
+		}
+		segments = append(segments, units[:end])
+		units = units[end:]
+	}
+	return segments
+}
+
+// encodeUCS2Units 把 UTF-16 码元序列编码为 UCS2 十六进制串。
+func encodeUCS2Units(units []uint16) string {
+	var b strings.Builder
+	for _, unit := range units {
+		fmt.Fprintf(&b, "%04X", unit)
+	}
+	return b.String()
 }
 
 func parseSMSDeliverPDU(pdu string) (smsPDUDecoded, bool) {
@@ -216,11 +257,21 @@ func encodePDUPhoneNumber(digits string) string {
 }
 
 func decodePDUAddress(digitCount int, toa byte, raw []byte) string {
+	// 类型号码段(TON, toa 的 bit6-4)决定地址编码方式:
+	//   0x5 字母型(alphanumeric)发送者(如 "MyBank")以 GSM 7bit 压缩存放,
+	//       不是 BCD 数字;旧实现 toa&0x90==0x90 同时命中字母型,按数字半八度
+	//       解码得到乱码并误加 "+" 前缀。字符数 = digitCount*4/7(03.40 §9.1.2.5)。
+	//   0x1 国际号码才是 BCD + "+" 前缀;其余类型按 BCD 但不加 "+"。
+	typeOfNumber := (toa >> 4) & 0x07
+	if typeOfNumber == 0x05 {
+		septets := (digitCount * 4) / 7
+		return strings.TrimRight(decodeGSM7(raw, septets, 0), "\x00\r\n ")
+	}
 	digits := decodePDUSemiOctets(raw, digitCount)
 	if digits == "" {
 		return ""
 	}
-	if toa&0x90 == 0x90 && !strings.HasPrefix(digits, "+") {
+	if typeOfNumber == 0x01 && !strings.HasPrefix(digits, "+") {
 		return "+" + digits
 	}
 	return digits
@@ -259,8 +310,11 @@ func decodePDUTimestamp(data []byte) string {
 		sign = "-"
 		tzByte &^= 0x08
 	}
-	tz := pduSemiOctetInt(tzByte)
-	return fmt.Sprintf("%02d/%02d/%02d,%02d:%02d:%02d%s%02d", parts[0], parts[1], parts[2], parts[3], parts[4], parts[5], sign, tz)
+	// 时区字段按 15 分钟刻度计数,直接 %02d 输出刻度数(北京显示 +32)
+	// 会误导;换算为时:分输出,如 32 刻度=08:00 → +08:00,
+	// 22 刻度=05:30 → +05:30(半小时时区也能正确表示)。
+	totalMinutes := pduSemiOctetInt(tzByte) * 15
+	return fmt.Sprintf("%02d/%02d/%02d,%02d:%02d:%02d%s%02d:%02d", parts[0], parts[1], parts[2], parts[3], parts[4], parts[5], sign, totalMinutes/60, totalMinutes%60)
 }
 
 func pduSemiOctetInt(value byte) int {
@@ -375,6 +429,6 @@ func buildMockSMSDeliverPDU(sender string, text string) string {
 		toa = 0x91
 	}
 	ud := encodeUCS2(text)
-	tpdu := fmt.Sprintf("04%02X%02X%s000862502320000000%02X%s", len(digits), toa, encodePDUPhoneNumber(digits), len(ud)/2, ud)
+	tpdu := fmt.Sprintf("04%02X%02X%s000862809241030023%02X%s", len(digits), toa, encodePDUPhoneNumber(digits), len(ud)/2, ud)
 	return "00" + tpdu
 }

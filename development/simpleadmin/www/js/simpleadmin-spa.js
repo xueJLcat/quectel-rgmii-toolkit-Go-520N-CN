@@ -3,16 +3,25 @@
 
   const root = global.SimpleAdmin || (global.SimpleAdmin = {});
   const pages = [
-    { id: 'dashboard', selector: '#dashboardApp', factoryName: 'dashboard', title: '首页' },
-    { id: 'network', selector: '#networkApp', factoryName: 'network', title: '网络' },
-    { id: 'settings', selector: '#settingsApp', factoryName: 'settings', title: '设置' },
-    { id: 'sms', selector: '#smsApp', factoryName: 'sms', title: '短信' },
+    { id: 'dashboard', selector: '#dashboardApp', factoryName: 'dashboard', title: '总览' },
+    { id: 'signal', selector: '#signalApp', factoryName: 'signal', title: '信号详情' },
+    { id: 'network', selector: '#networkApp', factoryName: 'network', title: '蜂窝网络' },
+    { id: 'celllock', selector: '#cellLockApp', factoryName: 'celllock', title: '小区锁定' },
+    { id: 'netconfig', selector: '#netConfigApp', factoryName: 'netconfig', title: '网络设置' },
+    { id: 'netdetail', selector: '#netDetailApp', factoryName: 'netdetail', title: '网络详情' },
+    { id: 'firewall', selector: '#firewallApp', factoryName: 'firewall', title: '防火墙' },
+    { id: 'atcommands', selector: '#atCommandsApp', factoryName: 'atcommands', title: 'AT 命令' },
+    { id: 'automation', selector: '#automationApp', factoryName: 'automation', title: '自动化' },
+    { id: 'sysmon', selector: '#sysmonApp', factoryName: 'sysmon', title: '系统监控' },
+    { id: 'settings', selector: '#settingsApp', factoryName: 'settings', title: '系统设置' },
+    { id: 'sms', selector: '#smsApp', factoryName: 'sms', title: '短信服务' },
     { id: 'deviceinfo', selector: '#deviceinfoApp', factoryName: 'deviceinfo', title: '设备信息' },
     { id: 'console', selector: null, factoryName: null, title: '控制台', frameSelector: '#consoleFrame', frameSrc: '/console' }
   ];
   const mountedPages = new Set();
   const revealTimers = new WeakMap();
   const pageIds = new Set(pages.map((page) => page.id));
+  let currentPageId = null;
 
   function disableBrowserScrollRestore() {
     try {
@@ -202,22 +211,47 @@
     mountedPages.add(id);
   }
 
+  function reloadConsole() {
+    const page = getPage('console');
+    const frame = document.querySelector(page.frameSelector);
+    if (!frame) return;
+    frame.removeAttribute('src');
+    frame.setAttribute('src', frame.getAttribute('data-console-src') || page.frameSrc);
+  }
+
+  function translateText(text) {
+    return root.Lang && typeof root.Lang.t === 'function' ? root.Lang.t(text) : text;
+  }
+
   function applyTitle(id) {
     const page = getPage(id);
+    const title = translateText(page.title);
     if (root.Brand && typeof root.Brand.setPageTitle === 'function') {
-      root.Brand.setPageTitle(page.title);
+      root.Brand.setPageTitle(title);
       return;
     }
-    document.title = page.title;
+    document.title = title;
   }
 
   function closeMobileSidebar() {
     const sidebar = document.getElementById('simpleadminSidebar');
     if (sidebar) sidebar.classList.remove('open');
+    const backdrop = document.getElementById('saBackdrop');
+    if (backdrop) backdrop.classList.remove('open');
   }
 
   function showPage(value, options) {
     const id = normalizePage(value);
+    const requested = String(value || '').replace(/^#/, '');
+    if (requested && id !== requested) {
+      updateAddressHash(id, true);
+    }
+    const force = options && options.force === true;
+    if (currentPageId === id && !force) {
+      closeMobileSidebar();
+      return;
+    }
+    currentPageId = id;
     disableBrowserScrollRestore();
     beginPageSwitch();
     setActiveSection(id);
@@ -260,13 +294,21 @@
     });
 
     const sidebar = document.getElementById('simpleadminSidebar');
+    const backdrop = document.getElementById('saBackdrop');
     if (sidebar) {
       document.querySelectorAll('.sa-sidebar-toggle').forEach((sidebarToggle) => {
         if (sidebarToggle.dataset.simpleadminSidebarBound === '1') return;
         sidebarToggle.dataset.simpleadminSidebarBound = '1';
         sidebarToggle.addEventListener('click', () => {
-          sidebar.classList.toggle('open');
+          const open = sidebar.classList.toggle('open');
+          if (backdrop) backdrop.classList.toggle('open', open);
         });
+      });
+    }
+    if (backdrop && backdrop.dataset.simpleadminBackdropBound !== '1') {
+      backdrop.dataset.simpleadminBackdropBound = '1';
+      backdrop.addEventListener('click', () => {
+        closeMobileSidebar();
       });
     }
 
@@ -276,6 +318,10 @@
 
     global.addEventListener('hashchange', () => {
       showPage(global.location.hash, { updateHash: false });
+    });
+
+    global.addEventListener('simpleadmin:language-changed', () => {
+      if (currentPageId) applyTitle(currentPageId);
     });
   }
 
@@ -289,7 +335,7 @@
   global.addEventListener('load', resetScrollPositionAfterBrowserRestore);
   global.addEventListener('pageshow', resetScrollPositionAfterBrowserRestore);
 
-  root.Spa = { showPage, mountPage, resetScrollPosition };
+  root.Spa = { showPage, mountPage, resetScrollPosition, reloadConsole };
 
   if (document.readyState === 'loading') {
     document.addEventListener('DOMContentLoaded', init, { once: true });

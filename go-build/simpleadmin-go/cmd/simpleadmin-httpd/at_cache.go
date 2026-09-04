@@ -7,6 +7,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -19,6 +20,15 @@ const (
 	atCachePeriodicInterval  = 15 * time.Second
 	atCacheFirstRefreshDelay = 500 * time.Millisecond
 	atCacheBootGracePeriod   = 35 * time.Second
+	// 非页面命令只在最近请求窗口内参与周期刷新,超过空闲阈值后从缓存淘汰。
+	atCacheRecentRequestWindow = 10 * time.Minute
+	atCacheIdleEvictAfter      = 15 * time.Minute
+	// worker 无可执行命令时的轮询间隔,等待保护期结束,避免忙等。
+	atCacheWorkerIdleSleep = 500 * time.Millisecond
+	// atCacheNegativeTTL 是失败负缓存有效期:命令执行失败后短期内不再重跑,
+	// Fetch/周期刷新直接返回缓存的错误文本。失败不入缓存会令每次请求都
+	// 重新入队执行,慢命令连续超时时形成重试风暴占死串行通道。
+	atCacheNegativeTTL = 3 * time.Second
 )
 
 type atCacheEntry struct {
@@ -26,8 +36,16 @@ type atCacheEntry struct {
 	response  string
 	errorText string
 	updatedAt time.Time
-	running   bool
-	waiters   []chan struct{}
+	// failedAt 记录最近一次执行失败的时刻,用于失败负缓存判定:
+	// 距失败未超过 atCacheNegativeTTL 时不再重跑,直接返回缓存的错误文本。
+	// 执行成功即清零。
+	failedAt time.Time
+	// lastRequested 记录最近一次经请求路径(Fetch)访问的时间,用于判断
+	// 非页面命令是否仍被关注:超出最近请求窗口不再周期刷新,超出空闲阈值
+	// 后整条淘汰。
+	lastRequested time.Time
+	running       bool
+	waiters       []chan struct{}
 }
 
 type atCommandCacheManager struct {
@@ -43,6 +61,12 @@ var atCommandCache = &atCommandCacheManager{
 	entries: make(map[string]*atCacheEntry),
 	queue:   make(chan string, 64),
 }
+
+// atCacheOverflowRunning 统计队列满时绕过 worker 直接执行的在途协程数。
+var atCacheOverflowRunning int64
+
+// atCacheOverflowMax 是溢出执行并发上限。声明为变量以便测试注入。
+var atCacheOverflowMax int64 = 8
 
 func (m *atCommandCacheManager) Start(mockMode bool) {
 	m.mu.Lock()
@@ -65,11 +89,45 @@ func (m *atCommandCacheManager) Start(mockMode bool) {
 	go m.initialRefresh()
 }
 
+// worker 从队列取命令执行。保护期内未就绪的读命令不阻塞队头:取出后若
+// 尚未就绪,先暂存到 deferred,优先检查并执行队列中已就绪的命令(动作
+// 命令总是就绪);没有可执行命令时短睡眠轮询,避免忙等。保护期内读命令
+// 对外仍立即返回后台处理中(由 Fetch 的 startupDelayedRead 分支保证)。
 func (m *atCommandCacheManager) worker() {
-	for command := range m.queue {
-		m.waitUntilReadyFor(command)
+	var deferred []string
+	for {
+		if len(deferred) == 0 {
+			deferred = append(deferred, <-m.queue)
+		} else {
+			select {
+			case command := <-m.queue:
+				deferred = append(deferred, command)
+			case <-time.After(atCacheWorkerIdleSleep):
+			}
+		}
+		index := -1
+		for i, command := range deferred {
+			if m.readyToRunNow(command) {
+				index = i
+				break
+			}
+		}
+		if index < 0 {
+			continue
+		}
+		command := deferred[index]
+		deferred = append(deferred[:index], deferred[index+1:]...)
 		m.run(command)
 	}
+}
+
+// readyToRunNow 判断命令当前是否可以立即执行:动作命令不受开机保护期限制,
+// 其余读命令需等待保护期结束。
+func (m *atCommandCacheManager) readyToRunNow(command string) bool {
+	if isATActionCommand(command) || m.currentMockMode() {
+		return true
+	}
+	return m.startupDelayRemaining() <= 0
 }
 
 func (m *atCommandCacheManager) periodicRefresh() {
@@ -79,8 +137,25 @@ func (m *atCommandCacheManager) periodicRefresh() {
 		if m.startupDelayRemaining() > 0 {
 			continue
 		}
+		m.evictIdleEntries()
 		for _, command := range m.cachedReadCommandsNeedingRefresh() {
 			m.enqueue(command, false)
+		}
+	}
+}
+
+// evictIdleEntries 淘汰不再被关注的条目:不在页面公共命令集合内、未在
+// 执行中且超过空闲阈值没有请求的条目从缓存删除,防止一次性手动命令的
+// 条目无限滞留。周期循环顺带执行,无额外定时器。
+func (m *atCommandCacheManager) evictIdleEntries() {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	for command, entry := range m.entries {
+		if entry.running || isCommonATCacheCommand(command) {
+			continue
+		}
+		if time.Since(entry.lastRequested) >= atCacheIdleEvictAfter {
+			delete(m.entries, command)
 		}
 	}
 }
@@ -96,10 +171,14 @@ func (m *atCommandCacheManager) Fetch(command string, force bool, waitOverride *
 	if command == "" {
 		return ""
 	}
+	m.touchRequested(command)
 
 	has, response, errorText, stale, running := m.snapshot(command)
-	startupDelayedRead := m.startupDelayRemaining() > 0 && !isATActionCommand(command) && !isATImmediateReadCommand(command)
-	mustRun := force || isATActionCommand(command) || !has || stale
+	startupDelayedRead := m.startupDelayRemaining() > 0 && !isATActionCommand(command)
+	// 失败负缓存有效期内不再重跑(强制刷新与动作命令除外),
+	// 直接返回缓存的错误文本,防止慢命令连续超时引发重试风暴。
+	negativeCached := !force && !isATActionCommand(command) && m.negativeCacheActive(command)
+	mustRun := force || isATActionCommand(command) || ((!has || stale) && !negativeCached)
 	var done <-chan struct{}
 	if mustRun {
 		done = m.enqueue(command, force || isATActionCommand(command))
@@ -156,6 +235,31 @@ func (m *atCommandCacheManager) snapshot(command string) (bool, string, string, 
 	return has, e.response, e.errorText, stale, e.running
 }
 
+// negativeCacheActiveLocked 判断条目是否处于失败负缓存有效期内(最近一次
+// 执行失败且距今未超过 atCacheNegativeTTL)。调用方必须持有 m.mu。
+func (m *atCommandCacheManager) negativeCacheActiveLocked(e *atCacheEntry) bool {
+	return e != nil && !e.failedAt.IsZero() && time.Since(e.failedAt) < atCacheNegativeTTL
+}
+
+func (m *atCommandCacheManager) negativeCacheActive(command string) bool {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.negativeCacheActiveLocked(m.entries[command])
+}
+
+// touchRequested 在请求路径记录条目的最近请求时间。只有 Fetch(用户/页面
+// 请求)会调用它:周期刷新与动作后的补刷新不算请求,不能续命空闲条目。
+func (m *atCommandCacheManager) touchRequested(command string) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	entry := m.entries[command]
+	if entry == nil {
+		entry = &atCacheEntry{command: command}
+		m.entries[command] = entry
+	}
+	entry.lastRequested = time.Now()
+}
+
 func (m *atCommandCacheManager) enqueue(command string, force bool) <-chan struct{} {
 	command = sanitizeATCommand(command)
 	done := make(chan struct{})
@@ -180,6 +284,11 @@ func (m *atCommandCacheManager) enqueue(command string, force bool) <-chan struc
 		close(done)
 		return done
 	}
+	if !force && m.negativeCacheActiveLocked(e) {
+		m.mu.Unlock()
+		close(done)
+		return done
+	}
 	e.running = true
 	e.waiters = append(e.waiters, done)
 	m.mu.Unlock()
@@ -187,10 +296,28 @@ func (m *atCommandCacheManager) enqueue(command string, force bool) <-chan struc
 	select {
 	case m.queue <- command:
 	default:
-		go func() {
-			m.waitUntilReadyFor(command)
-			m.run(command)
-		}()
+		// 队列满时原本无条件 spawn 协程绕过 worker 直接执行,通道拥塞时
+		// 无限协程堆在全局 AT 文件锁上滚雪球。此处限制溢出执行并发数:
+		// 超限则放弃本次执行并立即唤醒等待者(按当前快照返回 pending/旧
+		// 数据),命令保持未执行态,后续 Fetch/周期刷新会再入队。
+		if atomic.AddInt64(&atCacheOverflowRunning, 1) > atCacheOverflowMax {
+			atomic.AddInt64(&atCacheOverflowRunning, -1)
+			m.mu.Lock()
+			e.running = false
+			waiters := e.waiters
+			e.waiters = nil
+			m.mu.Unlock()
+			for _, waiter := range waiters {
+				close(waiter)
+			}
+			log.Printf("AT 缓存队列已满且溢出执行达到上限,本次放弃入队: command=%q", command)
+		} else {
+			go func() {
+				defer atomic.AddInt64(&atCacheOverflowRunning, -1)
+				m.waitUntilReadyFor(command)
+				m.run(command)
+			}()
+		}
 	}
 	return done
 }
@@ -217,9 +344,27 @@ func (m *atCommandCacheManager) run(command string) {
 		e = &atCacheEntry{command: command}
 		m.entries[command] = e
 	}
-	e.response = response
+	// 执行失败不得用部分输出/错误文本覆盖上次成功的响应:负缓存窗口内
+	// (has==true 时 responseOrPending 优先返回 response)覆盖会把截断的
+	// 半截列表当数据下发(如短信列表超时截断)。失败时保留最后成功值,
+	// 仅在无历史数据时才写入运行器返回内容(早退分支 has==false 时经
+	// errorText 返回错误信息,行为不变)。
+	if err == nil || e.response == "" {
+		e.response = response
+	}
 	e.errorText = errorText
-	e.updatedAt = time.Now()
+	// 执行失败不把错误文本当作有效缓存:保持原更新时间(过期或无数据),
+	// 避免在缓存期内一直返回旧的错误文本;本次请求仍通过
+	// response/errorText 拿到错误信息,对外行为不变。
+	// 但记录失败时刻进入负缓存:atCacheNegativeTTL 内 Fetch/周期刷新不再
+	// 重跑该命令,防止慢命令连续超时时每次请求都重新执行、重试风暴
+	// 占死串行的 AT 通道。负缓存过期后仍会按原语义立即重试。
+	if err == nil {
+		e.updatedAt = time.Now()
+		e.failedAt = time.Time{}
+	} else {
+		e.failedAt = time.Now()
+	}
 	e.running = false
 	waiters := e.waiters
 	e.waiters = nil
@@ -231,15 +376,41 @@ func (m *atCommandCacheManager) run(command string) {
 	if err != nil {
 		log.Printf("AT 后台缓存更新失败: command=%q error=%v", command, err)
 	}
+	// 只读命令刷新成功后通知已连接的前端,页面可据此静默刷新,无需轮询等待。
+	// 异步广播:单个写超时已由 writeFrame 限制,这里再用独立协程,确保任何客户端
+	// 问题都不会阻塞唯一的 AT 缓存 worker。
+	if err == nil && !isATActionCommand(command) {
+		go broadcastAPIWebSocketEvent("at_cache_updated", map[string]string{"command": command})
+	}
 	if isATActionCommand(command) {
 		m.invalidateReadCache()
+		// 模块经 CFUN 重启后 AT 口需要恢复时间:重新应用开机保护期,
+		// 保护期内读取类命令返回后台处理中,避免在模块未就绪时连续失败
+		// 并把错误文本写入缓存。
+		restartGrace := time.Duration(0)
+		// 动作识别(isATActionCommand)走 ToUpper 匹配,保护期重放判定也必须
+		// 大小写一致,否则小写 at+cfun=1,1 触发重启后不会进入读保护期、
+		// 读命令也不会在模块恢复后重放。
+		if strings.Contains(strings.ToUpper(command), "+CFUN=1,1") && !m.currentMockMode() {
+			m.mu.Lock()
+			m.readyAt = time.Now().Add(atCacheBootGracePeriod)
+			m.mu.Unlock()
+			restartGrace = atCacheBootGracePeriod
+			log.Printf("AT 缓存: 模块重启动作已执行,%s 内读取类命令进入保护期", atCacheBootGracePeriod)
+		}
 		go func() {
-			time.Sleep(2 * time.Second)
+			time.Sleep(2*time.Second + restartGrace)
 			m.enqueueCachedReadCommands()
 		}()
 	}
 }
 
+// invalidateReadCache 在动作命令(重启/改 IMEI 等)执行后使读缓存失效。
+// 除清零 updatedAt 外,必须同时清空残留的响应与错误文本:失效后这些内容
+// 已不代表模块当前状态,若保留,保护期内 Fetch 的早退分支在 has=false 时
+// 会优先返回残留 errorText(如上一次失败的 "timeout waiting for OK/ERROR"),
+// 而不是设计中的"后台处理中"。清空后条目彻底回到无数据态,早退分支经
+// running 标记统一返回 pending 文本。
 func (m *atCommandCacheManager) invalidateReadCache() {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -248,21 +419,12 @@ func (m *atCommandCacheManager) invalidateReadCache() {
 			continue
 		}
 		entry.updatedAt = time.Time{}
+		entry.response = ""
+		entry.errorText = ""
+		// 动作执行后模块状态已变,旧失败也不再代表现状,负缓存一并清除,
+		// 让读取命令在保护期结束后按正常流程重新执行。
+		entry.failedAt = time.Time{}
 	}
-}
-
-func (m *atCommandCacheManager) MarkStale(command string) {
-	command = sanitizeATCommand(command)
-	if command == "" {
-		return
-	}
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	entry := m.entries[command]
-	if entry == nil || entry.running {
-		return
-	}
-	entry.updatedAt = time.Time{}
 }
 
 func (m *atCommandCacheManager) currentMockMode() bool {
@@ -276,7 +438,11 @@ func (m *atCommandCacheManager) cachedReadCommandsNeedingRefresh() []string {
 	defer m.mu.Unlock()
 	commands := make([]string, 0, len(m.entries))
 	for command, entry := range m.entries {
-		if entry.running || isATActionCommand(command) || isPeriodicRefreshSuppressedATCommand(command) {
+		if entry.running || isATActionCommand(command) || isPeriodicRefreshSuppressedATCommand(command) ||
+			m.negativeCacheActiveLocked(entry) {
+			continue
+		}
+		if !isATCacheRefreshEligible(command, entry.lastRequested) {
 			continue
 		}
 		if entry.updatedAt.IsZero() || time.Since(entry.updatedAt) >= maxAgeForATCacheCommand(command) {
@@ -301,7 +467,7 @@ func (m *atCommandCacheManager) enqueueCachedReadCommands() {
 }
 
 func (m *atCommandCacheManager) waitUntilReadyFor(command string) {
-	if isATActionCommand(command) || isATImmediateReadCommand(command) || m.currentMockMode() {
+	if isATActionCommand(command) || m.currentMockMode() {
 		return
 	}
 	if delay := m.startupDelayRemaining(); delay > 0 {
@@ -349,7 +515,9 @@ func systemUptimeDuration() (time.Duration, bool) {
 	return time.Duration(seconds * float64(time.Second)), true
 }
 
-func executeCachedATCommand(command string, mockMode bool) (string, error) {
+// executeCachedATCommand 是缓存条目的实际执行入口。声明为 var 以便测试
+// 注入成功/失败桩,运行期行为不变。
+var executeCachedATCommand = func(command string, mockMode bool) (string, error) {
 	if mockMode {
 		return mockATResponse(command), nil
 	}
@@ -406,120 +574,19 @@ func boolQuery(r *http.Request, name string, fallback bool) bool {
 }
 
 func atCacheWaitTimeout(command string) time.Duration {
-	timeout := time.Duration(atCommandTimeoutMS(command)+2000) * time.Millisecond
+	// 读取命令超时后运行器会重试一次(250ms 间隔),最坏耗时为
+	// 2×命令超时+重试间隔;动作命令(写/重启/删除)不会重试,单次预算即可。
+	// 等待预算必须覆盖对应最坏值,否则首次尝试超时后 Fetch 提前放弃
+	// 返回 pending/旧数据,而重试其实仍在进行并最终成功。
+	budget := atCommandTimeoutMS(command)
+	if !isATActionCommand(command) {
+		budget = 2*budget + 250
+	}
+	timeout := time.Duration(budget+2000) * time.Millisecond
 	if timeout < 2*time.Second {
 		return 2 * time.Second
 	}
 	return timeout
-}
-
-func maxAgeForATCacheCommand(command string) time.Duration {
-	command = sanitizeATCommand(command)
-	upper := strings.ToUpper(command)
-	switch {
-	case isATActionCommand(command):
-		return 0
-	case isStandaloneModelCommand(command) || isDeviceStaticInfoCommand(command):
-		return atCacheStaticMaxAge
-	case isSettingsStatusConfigCommand(command) || isStandaloneLANIPCommand(command) || isBandPreferenceQueryCommand(command):
-		return atCacheConfigMaxAge
-	case isNetworkPreferenceStatusCommand(command):
-		return atCacheSemiStaticMaxAge
-	case isSMSListCommand(command):
-		return 5 * time.Second
-	case strings.Contains(upper, "+QSIMSTAT") || strings.Contains(upper, "+CPIN") || strings.Contains(upper, `+QMAP="WWAN"`) || strings.Contains(upper, "+QCAINFO") || strings.Contains(upper, "+QENG") || strings.Contains(upper, "+QRSRP") || strings.Contains(upper, "+CSQ") || strings.Contains(upper, "+QTEMP"):
-		return atCacheReadMaxAge
-	case strings.Contains(upper, "+CIMI") || strings.Contains(upper, "+ICCID") || strings.Contains(upper, "+CNUM") || strings.Contains(upper, "+CGMI") || strings.Contains(upper, "+CGSN") || strings.Contains(upper, "+QGMR"):
-		return atCacheStaticMaxAge
-	default:
-		return atCacheReadMaxAge
-	}
-}
-
-func isStandaloneModelCommand(command string) bool {
-	return strings.EqualFold(strings.TrimSpace(sanitizeATCommand(command)), "AT+CGMM")
-}
-
-func isStandaloneLANIPCommand(command string) bool {
-	return strings.EqualFold(strings.TrimSpace(sanitizeATCommand(command)), `AT+QMAP="LANIP"`)
-}
-
-func isDeviceStaticInfoCommand(command string) bool {
-	return strings.EqualFold(strings.TrimSpace(sanitizeATCommand(command)), `AT+CGMI;+CGSN;+QGMR;+CIMI;+ICCID;+CNUM`)
-}
-
-func isBandPreferenceQueryCommand(command string) bool {
-	upper := strings.ToUpper(sanitizeATCommand(command))
-	return strings.Contains(upper, `+QNWPREFCFG="LTE_BAND"`) &&
-		strings.Contains(upper, `+QNWPREFCFG= "NSA_NR5G_BAND"`) &&
-		strings.Contains(upper, `+QNWPREFCFG= "NR5G_BAND"`)
-}
-
-func isNetworkPreferenceStatusCommand(command string) bool {
-	upper := strings.ToUpper(sanitizeATCommand(command))
-	return strings.Contains(upper, `+QNWPREFCFG="MODE_PREF"`) &&
-		strings.Contains(upper, `+QNWPREFCFG="NR5G_DISABLE_MODE"`) &&
-		strings.Contains(upper, "+CGDCONT?") &&
-		strings.Contains(upper, "+CGCONTRDP=1") &&
-		strings.Contains(upper, `+QNWLOCK="COMMON/4G"`) &&
-		strings.Contains(upper, `+QNWLOCK="COMMON/5G"`)
-}
-
-func isSettingsStatusConfigCommand(command string) bool {
-	upper := strings.ToUpper(sanitizeATCommand(command))
-	return strings.Contains(upper, `+QMAP="MPDN_RULE"`) &&
-		strings.Contains(upper, `+QMAP="DHCPV6DNS"`) &&
-		strings.Contains(upper, `+QCFG="USBNET"`) &&
-		strings.Contains(upper, `+QMAP="DMZ"`) &&
-		strings.Contains(upper, `+QMAP="DHCPV4DNS"`)
-}
-
-func isSMSListCommand(command string) bool {
-	upper := strings.ToUpper(sanitizeATCommand(command))
-	return strings.Contains(upper, "+CMGL=4") || strings.Contains(upper, `+CMGL="ALL"`)
-}
-
-func isPeriodicRefreshSuppressedATCommand(command string) bool {
-	return isStandaloneModelCommand(command) || isSMSListCommand(command)
-}
-
-func isATImmediateReadCommand(command string) bool {
-	return isStandaloneModelCommand(command)
-}
-
-func isATActionCommand(command string) bool {
-	upper := strings.ToUpper(command)
-	if upper == "AT&F" || strings.Contains(upper, ";AT&F") {
-		return true
-	}
-	patterns := []string{
-		"+CFUN=",
-		"+EGMR=",
-		"+CMGD",
-		"+CMGS",
-		"+QSCAN=",
-		"+CGDCONT=",
-		"+QMAPWAC=",
-		`+QCFG="USBNET",`,
-		`+QMAP="MPDN_RULE",0`,
-		`+QMAP="DHCPV6DNS",`,
-		`+QMAP="DHCPV4DNS",`,
-		`+QMAP="DMZ",`,
-		`+QMAP="LANIP",`,
-		`+QNWPREFCFG="LTE_BAND",`,
-		`+QNWPREFCFG="NSA_NR5G_BAND",`,
-		`+QNWPREFCFG="NR5G_BAND",`,
-		`+QNWPREFCFG="MODE_PREF",`,
-		`+QNWPREFCFG="NR5G_DISABLE_MODE",`,
-		`+QNWLOCK="COMMON/4G",`,
-		`+QNWLOCK="COMMON/5G",`,
-	}
-	for _, pattern := range patterns {
-		if strings.Contains(upper, pattern) {
-			return true
-		}
-	}
-	return false
 }
 
 func commonATCacheCommands() []string {
@@ -529,7 +596,8 @@ func commonATCacheCommands() []string {
 		atKeyDeviceInfo,
 		atKeyNetworkBands,
 		atKeyNetworkSettings,
-		atKeySettingsStatus,
+		atKeyNetworkConfigStatus,
+		atKeySystemStatus,
 	} {
 		commands = append(commands, pageATCommands(key)...)
 	}
@@ -538,4 +606,12 @@ func commonATCacheCommands() []string {
 
 func smsListATCommand() string {
 	return `AT+CSMS=1;+CSDH=0;+CNMI=2,1,0,0,0;+CMGF=0;+CPMS="ME","ME","ME";+CMGL=4`
+}
+
+// smsListSMATCommand 读取 SM(SIM)存储的短信。入站短信按 CPMS mem3 路由,
+// 可能滞留 SM 而 ME 为空,列表需双存储合并(见 fetchSMSListDualStorage)。
+// 该命令会把 mem1/2/3 切到 SM,因此必须在读取后由后续命令重新声明存储归属
+// (ME 列表命令自带 +CPMS="ME","ME","ME",天然完成复位)。
+func smsListSMATCommand() string {
+	return `AT+CMGF=0;+CPMS="SM","SM","SM";+CMGL=4`
 }

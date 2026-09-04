@@ -207,54 +207,42 @@ func replaceMockATLines(raw, prefix, payload string) string {
 	return strings.Join(out, "\n")
 }
 
+// 以下默认载荷为首页/小区/载波的示例信号数据(中国电信 46011,5G SA n1 FDD 驻留),
+// 与目标模块移远 RG520N-CN 的频段能力一致;身份类数据(IMEI/IMSI/ICCID)已在
+// mock_at_responses.go 的常量中匿名化。
 func defaultMockDashboardATResponse(command string) string {
-	return strings.TrimSpace(command) + `
-+QSIMSTAT: 0,1
-
-+CSQ: 28,99
-
-+QTEMP:"modem-lte-sub6-pa1","31"
-+QTEMP:"aoss-0-usr","35"
-+QTEMP:"cpuss-0-usr","35"
-+QTEMP:"mdmq6-0-usr","35"
-+QTEMP:"mdmss-0-usr","36"
-+QTEMP:"modem-ambient-usr","31"
-
-+QUIMSLOT: 1
-
-+QSPN: "mobily","mobily","mobily",0,"42003"
-
-+QMAP: "WWAN",1,1,"IPV4","10.219.172.53"
-+QMAP: "WWAN",1,1,"IPV6","2a02:9b0:4070:fb:25a7:ccee:35bc:8062"
-
-+QENG: "servingcell","NOCONN"
-+QENG: "LTE","FDD",420,03,29E5B01,445,1850,3,5,5,439E,-88,-7,-61,15,10,200,-
-+QENG: "NR5G-NSA",420,03,542,-98,18,-10,660768,77,12,1
-
-+QCAINFO: "PCC",1850,100,"LTE BAND 3",1,445,-88,-8,-61,10
-+QCAINFO: "SCC",300,100,"LTE BAND 1",1,445,-96,-12,-74,6,0,-,-
-+QCAINFO: "SCC",660768,12,"NR5G BAND 77",542
-
-+QGDNRCNT: 1961485,17217894
-
-+QGDCNT: 1979589,17236170
-
-+CGCONTRDP: 1,5,"WEB2","10.219.172.53","42.2.9.176.64.112.0.251.24.115.78.183.236.93.220.56", "254.128.0.0.0.0.0.0.0.0.0.0.0.0.0.1","86.51.34.24"
-
-+QRSRP: -91,-88,-140,-140,LTE
-+QRSRP: -120,-98,-110,-106,NR5G
-
-OK`
+	lines := []string{strings.TrimSpace(command), "", "+QSIMSTAT: 0,1", "", "+CSQ: 99,99", ""}
+	lines = append(lines, mockQTEMPSensorLines()...)
+	lines = append(lines,
+		"",
+		"+QUIMSLOT: 1",
+		"",
+		mockQSPNLine,
+		"",
+		`+QMAP: "WWAN",1,1,"IPV4","`+mockWWANIPv4+`"`,
+		`+QMAP: "WWAN",1,1,"IPV6","`+mockWWANIPv6+`"`,
+		"",
+		`+QENG: "servingcell","NOCONN","NR5G-SA","FDD",460,11,24211A484,649,242000,428910,1,6,-86,-11,25,0,-`,
+		"",
+		`+QCAINFO: "PCC",428910,6,"NR5G BAND 1",649`,
+		"",
+		"+QGDNRCNT: 62817184,45605113",
+		"",
+		"+QGDCNT: 0,0",
+		"",
+		mockCGCONTRDP,
+		"",
+		"+QRSRP: -85,-86,-86,-83,NR5G",
+		"",
+		"OK",
+	)
+	return strings.Join(lines, "\r\n") + "\r\n"
 }
 
 func defaultMockQCAInfoPayload() string {
-	return `+QCAINFO: "PCC",1850,100,"LTE BAND 3",1,445,-88,-8,-61,10
-+QCAINFO: "SCC",300,100,"LTE BAND 1",1,445,-96,-12,-74,6,0,-,-
-+QCAINFO: "SCC",660768,12,"NR5G BAND 77",542`
+	return `+QCAINFO: "PCC",428910,6,"NR5G BAND 1",649`
 }
 
 func defaultMockQENGPayload() string {
-	return `+QENG: "servingcell","NOCONN"
-+QENG: "LTE","FDD",420,03,29E5B01,445,1850,3,5,5,439E,-88,-7,-61,15,10,200,-
-+QENG: "NR5G-NSA",420,03,542,-98,18,-10,660768,77,12,1`
+	return `+QENG: "servingcell","NOCONN","NR5G-SA","FDD",460,11,24211A484,649,242000,428910,1,6,-86,-11,25,0,-`
 }

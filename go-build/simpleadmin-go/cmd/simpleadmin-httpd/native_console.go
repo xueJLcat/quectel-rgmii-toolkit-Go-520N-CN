@@ -8,6 +8,7 @@ import (
 	"crypto/sha1"
 	"encoding/base64"
 	"encoding/binary"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -26,240 +27,42 @@ import (
 
 const websocketGUID = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
 
+// 终端默认窗口尺寸(客户端连接后会通过 resize 控制帧上报实际尺寸)。
 const (
-	nativeConsoleUsername         = "root"
-	nativeConsolePassword         = "admin321"
-	nativeConsoleMaxLoginAttempts = 3
+	nativeConsoleDefaultRows = 32
+	nativeConsoleDefaultCols = 120
 )
 
-const nativeConsoleHTML = `<!doctype html>
-<html lang="zh-CN">
-<head>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width,initial-scale=1">
-<title>Terminal</title>
-<style>
-html,body{height:100%;margin:0;overflow:hidden;background:#050505;color:#f2f2f2;font-family:Consolas,Menlo,monospace}
-body{display:flex;flex-direction:column;min-height:0}
-#bar{flex:0 0 auto;min-height:40px;box-sizing:border-box;padding:9px 14px;background:#171717;border-bottom:1px solid #333;display:flex;gap:12px;align-items:center}
-#state{font-size:14px;color:#9ad}
-#hint{font-size:12px;color:#aaa}
-#term{flex:1 1 auto;min-height:0;height:auto;box-sizing:border-box;overflow:auto;scrollbar-width:none;-ms-overflow-style:none;padding:12px;white-space:pre-wrap;word-break:break-word;outline:none;font-size:15px;line-height:1.35;background:#050505}
-#term::-webkit-scrollbar{width:0;height:0}
-.cursor::after{content:"_";animation:blink 1s steps(1) infinite}@keyframes blink{50%{opacity:0}}
-</style>
-</head>
-<body>
-<div id="bar"><strong>Terminal</strong><span id="state">connecting...</span><span id="hint">Click here and type. Ctrl+C / Ctrl+D / arrows are supported.</span></div>
-<pre id="term" class="cursor" tabindex="0"></pre>
-<script>
-(function(){
-  var term=document.getElementById('term');
-  var state=document.getElementById('state');
-  var decoder=new TextDecoder('utf-8');
-  var encoder=new TextEncoder();
-  var scheme=location.protocol==='https:'?'wss':'ws';
-  var ws=new WebSocket(scheme+'://'+location.host+'/api/console/ws');
-  ws.binaryType='arraybuffer';
+// 与 api_websocket.go 保持一致的超时保护,声明为变量便于测试注入。
+//
+// nativeConsoleReadTimeout 是读循环的空闲上限:每读一帧前置位并续期。
+// 客户端断电/拔线后连接停留在半开状态时,读协程靠它超时退出,
+// 随连接清理一起终止 PTY shell,避免协程与进程永久泄漏。
+//
+// nativeConsoleWriteTimeout 限制单帧写入时间,防止卡死客户端阻塞写端。
+var (
+	nativeConsoleReadTimeout  = 5 * time.Minute
+	nativeConsoleWriteTimeout = 5 * time.Second
+)
 
-  function setState(text){ state.textContent=text; }
-  function scrollBottom(){ term.scrollTop=term.scrollHeight; }
-  var ansiState={fg:'',bg:'',bold:false,dim:false,underline:false};
-  var ansiCarry='';
-  var ansiColors={
-    30:'#000000',31:'#cc5555',32:'#55cc55',33:'#cccc55',34:'#5555cc',35:'#cc55cc',36:'#55cccc',37:'#dddddd',
-    90:'#777777',91:'#ff7777',92:'#77ff77',93:'#ffff77',94:'#7777ff',95:'#ff77ff',96:'#77ffff',97:'#ffffff',
-    40:'#000000',41:'#5f1f1f',42:'#1f5f1f',43:'#5f5f1f',44:'#1f1f5f',45:'#5f1f5f',46:'#1f5f5f',47:'#dddddd',
-    100:'#555555',101:'#7f3333',102:'#337f33',103:'#7f7f33',104:'#33337f',105:'#7f337f',106:'#337f7f',107:'#ffffff'
-  };
-  var ansi256=[
-    '#000000','#800000','#008000','#808000','#000080','#800080','#008080','#c0c0c0',
-    '#808080','#ff0000','#00ff00','#ffff00','#0000ff','#ff00ff','#00ffff','#ffffff'
-  ];
-  function xterm256Color(n){
-    n=Number(n);
-    if(n>=0 && n<16) return ansi256[n];
-    if(n>=16 && n<=231){
-      var c=n-16;
-      var r=Math.floor(c/36), g=Math.floor((c%36)/6), b=c%6;
-      var conv=function(v){ return v===0?0:55+v*40; };
-      return 'rgb('+conv(r)+','+conv(g)+','+conv(b)+')';
-    }
-    if(n>=232 && n<=255){
-      var level=8+(n-232)*10;
-      return 'rgb('+level+','+level+','+level+')';
-    }
-    return '';
-  }
-  function resetAnsi(){ ansiState={fg:'',bg:'',bold:false,dim:false,underline:false}; }
-  function applySgr(params){
-    if(!params.length) params=['0'];
-    for(var i=0;i<params.length;i++){
-      var raw=params[i];
-      var code=raw===''?0:Number(raw);
-      if(!isFinite(code)) continue;
-      if(code===0){ resetAnsi(); }
-      else if(code===1){ ansiState.bold=true; ansiState.dim=false; }
-      else if(code===2){ ansiState.dim=true; }
-      else if(code===4){ ansiState.underline=true; }
-      else if(code===22){ ansiState.bold=false; ansiState.dim=false; }
-      else if(code===24){ ansiState.underline=false; }
-      else if(code===39){ ansiState.fg=''; }
-      else if(code===49){ ansiState.bg=''; }
-      else if((code>=30 && code<=37) || (code>=90 && code<=97)){ ansiState.fg=ansiColors[code] || ''; }
-      else if((code>=40 && code<=47) || (code>=100 && code<=107)){ ansiState.bg=ansiColors[code] || ''; }
-      else if((code===38 || code===48) && params[i+1]==='5' && i+2<params.length){
-        var color=xterm256Color(params[i+2]);
-        if(code===38) ansiState.fg=color; else ansiState.bg=color;
-        i+=2;
-      }else if((code===38 || code===48) && params[i+1]==='2' && i+4<params.length){
-        var r=Number(params[i+2]), g=Number(params[i+3]), b=Number(params[i+4]);
-        if(isFinite(r) && isFinite(g) && isFinite(b)){
-          var rgb='rgb('+Math.max(0,Math.min(255,r))+','+Math.max(0,Math.min(255,g))+','+Math.max(0,Math.min(255,b))+')';
-          if(code===38) ansiState.fg=rgb; else ansiState.bg=rgb;
-        }
-        i+=4;
-      }
-    }
-  }
-  function spanHasStyle(){ return ansiState.fg || ansiState.bg || ansiState.bold || ansiState.dim || ansiState.underline; }
-  function appendStyledText(text){
-    if(!text) return;
-    var node;
-    if(spanHasStyle()){
-      node=document.createElement('span');
-      if(ansiState.fg) node.style.color=ansiState.fg;
-      if(ansiState.bg) node.style.backgroundColor=ansiState.bg;
-      if(ansiState.bold) node.style.fontWeight='700';
-      if(ansiState.dim) node.style.opacity='0.65';
-      if(ansiState.underline) node.style.textDecoration='underline';
-      node.textContent=text;
-    }else{
-      node=document.createTextNode(text);
-    }
-    term.appendChild(node);
-  }
-  function removeLastCharacter(){
-    var node=term.lastChild;
-    while(node){
-      var text=node.textContent || '';
-      if(text.length>0){
-        node.textContent=text.slice(0,-1);
-        if(!node.textContent && node.parentNode) node.parentNode.removeChild(node);
-        return;
-      }
-      var prev=node.previousSibling;
-      if(node.parentNode) node.parentNode.removeChild(node);
-      node=prev;
-    }
-  }
-  function clearTerm(){
-    term.textContent='';
-    resetAnsi();
-  }
-  function pruneTerm(){
-    if(term.textContent.length<=200000) return;
-    term.textContent=term.textContent.slice(-120000);
-  }
-  function appendPlain(s){
-    var start=0;
-    for(var i=0;i<s.length;i++){
-      var ch=s[i];
-      if(ch==='\b' || ch==='\x7f' || ch==='\f'){
-        if(i>start) appendStyledText(s.slice(start,i));
-        if(ch==='\f') clearTerm(); else removeLastCharacter();
-        start=i+1;
-      }
-    }
-    if(start<s.length) appendStyledText(s.slice(start));
-  }
-  function appendText(s){
-    s=(ansiCarry+s).replace(/\r/g,'');
-    ansiCarry='';
-    var i=0;
-    while(i<s.length){
-      var esc=s.indexOf('\x1b',i);
-      if(esc<0){ appendPlain(s.slice(i)); break; }
-      if(esc>i) appendPlain(s.slice(i,esc));
-      if(esc+1>=s.length){ ansiCarry=s.slice(esc); break; }
-      var next=s[esc+1];
-      if(next==='['){
-        var end=esc+2;
-        while(end<s.length && (s.charCodeAt(end)<0x40 || s.charCodeAt(end)>0x7e)) end++;
-        if(end>=s.length){ ansiCarry=s.slice(esc); break; }
-        var final=s[end];
-        if(final==='m') applySgr(s.slice(esc+2,end).split(';'));
-        i=end+1;
-      }else if(next===']'){
-        var bel=s.indexOf('\x07',esc+2);
-        var st=s.indexOf('\x1b\\',esc+2);
-        var oscEnd=-1;
-        if(bel>=0 && st>=0) oscEnd=Math.min(bel,st+1);
-        else if(bel>=0) oscEnd=bel;
-        else if(st>=0) oscEnd=st+1;
-        if(oscEnd<0){ ansiCarry=s.slice(esc); break; }
-        i=oscEnd+1;
-      }else if(next==='(' || next===')'){
-        if(esc+2>=s.length){ ansiCarry=s.slice(esc); break; }
-        i=esc+3;
-      }else{
-        i=esc+2;
-      }
-    }
-    pruneTerm();
-    scrollBottom();
-  }
-  function sendBytes(text){
-    if(ws.readyState===WebSocket.OPEN) ws.send(encoder.encode(text));
-  }
-  ws.onopen=function(){ setState('connected'); term.focus(); };
-  ws.onclose=function(){ setState('closed'); appendText('\n[console closed]\n'); };
-  ws.onerror=function(){ setState('error'); };
-  ws.onmessage=function(ev){
-    if(ev.data instanceof ArrayBuffer){ appendText(decoder.decode(ev.data,{stream:true})); }
-    else { appendText(String(ev.data)); }
-  };
-
-  document.addEventListener('keydown',function(e){
-    if(document.activeElement!==term) term.focus();
-    var v=null;
-    if(e.ctrlKey){
-      var k=e.key.toLowerCase();
-      if(k==='c') v='\x03';
-      else if(k==='d') v='\x04';
-      else if(k==='l') v='\x0c';
-      else if(k==='z') v='\x1a';
-    }else if(e.key==='Enter') v='\r';
-    else if(e.key==='Backspace') v='\x7f';
-    else if(e.key==='Tab') v='\t';
-    else if(e.key==='ArrowUp') v='\x1b[A';
-    else if(e.key==='ArrowDown') v='\x1b[B';
-    else if(e.key==='ArrowRight') v='\x1b[C';
-    else if(e.key==='ArrowLeft') v='\x1b[D';
-    else if(e.key==='Home') v='\x1b[H';
-    else if(e.key==='End') v='\x1b[F';
-    else if(e.key==='Delete') v='\x1b[3~';
-    else if(e.key==='PageUp') v='\x1b[5~';
-    else if(e.key==='PageDown') v='\x1b[6~';
-    else if(e.key.length===1) v=e.key;
-    if(v!==null){ e.preventDefault(); sendBytes(v); }
-  });
-  term.addEventListener('paste',function(e){
-    e.preventDefault();
-    var text=(e.clipboardData||window.clipboardData).getData('text') || '';
-    sendBytes(text.replace(/\r?\n/g,'\r'));
-  });
-  term.addEventListener('click',function(){ term.focus(); });
-})();
-</script>
-</body>
-</html>
-`
+// nativeConsoleResizeMessage 是客户端→服务端的窗口尺寸控制帧。
+// 终端键入始终以二进制帧(0x2)原样写入 PTY,文本帧(0x1)保留给
+// JSON 控制消息,两类帧互不冲突。
+type nativeConsoleResizeMessage struct {
+	Type string `json:"type"`
+	Cols int    `json:"cols"`
+	Rows int    `json:"rows"`
+}
 
 type nativeWSConn struct {
 	conn net.Conn
 	br   *bufio.Reader
 	mu   sync.Mutex
+
+	// rows/cols 记录最近一次客户端上报的窗口尺寸,
+	// shell 启动前收到的 resize 帧先暂存于此,启动时套用。
+	rows uint16
+	cols uint16
 }
 
 type winsize struct {
@@ -297,7 +100,7 @@ func (s *simpleAdminServer) handleNativeConsoleWebSocket(w http.ResponseWriter, 
 	if err != nil {
 		return
 	}
-	ws := &nativeWSConn{conn: conn, br: rw.Reader}
+	ws := &nativeWSConn{conn: conn, br: rw.Reader, rows: nativeConsoleDefaultRows, cols: nativeConsoleDefaultCols}
 	accept := websocketAcceptKey(r.Header.Get("Sec-WebSocket-Key"))
 	_, _ = rw.Writer.WriteString("HTTP/1.1 101 Switching Protocols\r\n")
 	_, _ = rw.Writer.WriteString("Upgrade: websocket\r\n")
@@ -310,11 +113,7 @@ func (s *simpleAdminServer) handleNativeConsoleWebSocket(w http.ResponseWriter, 
 
 	defer conn.Close()
 
-	if !authenticateNativeConsole(ws) {
-		return
-	}
-
-	shell, err := startNativeConsoleShell()
+	shell, err := startNativeConsoleShell(ws.rows, ws.cols)
 	if err != nil {
 		_ = ws.writeBinary([]byte("failed to start shell: " + err.Error() + "\n"))
 		_ = ws.writeClose()
@@ -322,10 +121,7 @@ func (s *simpleAdminServer) handleNativeConsoleWebSocket(w http.ResponseWriter, 
 	}
 	defer shell.close()
 
-	consoleModel, _ := s.fetchStandaloneModel(false)
-	if consoleModel == "-" || strings.TrimSpace(consoleModel) == "" {
-		consoleModel = "SimpleAdmin"
-	}
+	consoleModel := deviceModelName
 	_ = ws.writeBinary([]byte("==============================================================\r\n"))
 	_ = ws.writeBinary([]byte(consoleModel + " native Go console\r\n"))
 	_ = ws.writeBinary([]byte("AT channel: /dev/smd11 is used by " + consoleModel + "\r\n"))
@@ -347,23 +143,41 @@ func (s *simpleAdminServer) handleNativeConsoleWebSocket(w http.ResponseWriter, 
 			}
 		}
 	}()
+	// shell 退出后主循环可能正阻塞在读帧(最长 5 分钟空闲超时):立即把读
+	// 截止时刻置为当前,使读操作带超时返回、连接与协程及时释放,
+	// 前端也能立刻感知会话结束,而不是数分钟后才超时。
+	go func() {
+		<-done
+		_ = conn.SetReadDeadline(time.Now())
+	}()
 
 	for {
-		opcode, payload, err := ws.readClientFrame()
+		opcode, payload, err := ws.readClientMessage()
 		if err != nil {
+			if netErr, ok := err.(net.Error); ok && netErr.Timeout() {
+				log.Printf("console websocket read idle timeout after %s, closing connection", nativeConsoleReadTimeout)
+			}
 			return
 		}
 		switch opcode {
-		case 0x1, 0x2, 0x0:
+		case 0x2:
+			// 二进制消息(分片已由 readClientMessage 重组)作为 shell 输入。
 			if len(payload) > 0 {
 				if _, err := shell.master.Write(payload); err != nil {
 					return
 				}
 			}
+		case 0x1:
+			// 文本帧为控制消息(目前仅 resize)。解析失败或类型未知的
+			// 控制帧直接忽略,不崩溃也不中断连接。
+			if ws.handleResizeFrame(payload) {
+				setPTYWindowSize(shell.master.Fd(), ws.rows, ws.cols)
+			}
 		case 0x8:
 			_ = ws.writeClose()
 			return
 		case 0x9:
+			// readClientMessage 已就地应答 ping;此处为防御性兜底。
 			_ = ws.writeFrame(0xA, payload)
 		case 0xA:
 		default:
@@ -407,98 +221,31 @@ func normalizeOriginHost(host string) string {
 	return host
 }
 
-func authenticateNativeConsole(ws *nativeWSConn) bool {
-	_ = ws.writeBinary([]byte("Terminal login required\r\n"))
-	for attempt := 0; attempt < nativeConsoleMaxLoginAttempts; attempt++ {
-		username, ok := readNativeConsoleLine(ws, "login: ", false)
-		if !ok {
-			return false
-		}
-		password, ok := readNativeConsoleLine(ws, "Password: ", true)
-		if !ok {
-			return false
-		}
-		if constantTimeEqual(strings.TrimSpace(username), nativeConsoleUsername) && constantTimeEqual(password, nativeConsolePassword) {
-			_ = ws.writeBinary([]byte("\r\n"))
-			return true
-		}
-		_ = ws.writeBinary([]byte("\r\nLogin incorrect\r\n"))
+// parseConsoleResizeMessage 解析客户端窗口尺寸控制帧。
+// 非法 JSON、类型不是 resize、尺寸越界一律返回 ok=false,由调用方忽略。
+func parseConsoleResizeMessage(payload []byte) (rows, cols uint16, ok bool) {
+	var msg nativeConsoleResizeMessage
+	if err := json.Unmarshal(payload, &msg); err != nil {
+		return 0, 0, false
 	}
-	_ = ws.writeBinary([]byte("Too many failed login attempts\r\n"))
-	_ = ws.writeClose()
-	return false
+	if !strings.EqualFold(strings.TrimSpace(msg.Type), "resize") {
+		return 0, 0, false
+	}
+	if msg.Cols < 1 || msg.Cols > 1000 || msg.Rows < 1 || msg.Rows > 1000 {
+		return 0, 0, false
+	}
+	return uint16(msg.Rows), uint16(msg.Cols), true
 }
 
-func readNativeConsoleLine(ws *nativeWSConn, prompt string, hidden bool) (string, bool) {
-	var builder strings.Builder
-	if err := ws.writeBinary([]byte(prompt)); err != nil {
-		return "", false
+// handleResizeFrame 尝试把文本帧解析为 resize 控制消息并记录最新尺寸,
+// 解析失败返回 false(调用方应忽略该帧)。
+func (ws *nativeWSConn) handleResizeFrame(payload []byte) bool {
+	rows, cols, ok := parseConsoleResizeMessage(payload)
+	if !ok {
+		return false
 	}
-	for {
-		opcode, payload, err := ws.readClientFrame()
-		if err != nil {
-			return "", false
-		}
-		switch opcode {
-		case 0x1, 0x2, 0x0:
-			done, err := appendNativeConsoleLineInput(&builder, payload, hidden, ws.writeBinary)
-			if err != nil {
-				return "", false
-			}
-			if done {
-				return builder.String(), true
-			}
-		case 0x8:
-			_ = ws.writeClose()
-			return "", false
-		case 0x9:
-			_ = ws.writeFrame(0xA, payload)
-		case 0xA:
-		default:
-		}
-	}
-}
-
-func appendNativeConsoleLineInput(builder *strings.Builder, payload []byte, hidden bool, echo func([]byte) error) (bool, error) {
-	for _, b := range payload {
-		switch b {
-		case '\r', '\n':
-			if err := echo([]byte("\r\n")); err != nil {
-				return false, err
-			}
-			return true, nil
-		case '\b', 0x7f:
-			current := builder.String()
-			if current == "" {
-				continue
-			}
-			runes := []rune(current)
-			builder.Reset()
-			builder.WriteString(string(runes[:len(runes)-1]))
-			if !hidden {
-				if err := echo([]byte("\b \b")); err != nil {
-					return false, err
-				}
-			}
-		case 0x03:
-			builder.Reset()
-			if err := echo([]byte("^C\r\n")); err != nil {
-				return false, err
-			}
-			return true, nil
-		default:
-			if b < 0x20 {
-				continue
-			}
-			builder.WriteByte(b)
-			if !hidden {
-				if err := echo([]byte{b}); err != nil {
-					return false, err
-				}
-			}
-		}
-	}
-	return false, nil
+	ws.rows, ws.cols = rows, cols
+	return true
 }
 
 func websocketAcceptKey(key string) string {
@@ -506,51 +253,132 @@ func websocketAcceptKey(key string) string {
 	return base64.StdEncoding.EncodeToString(sum[:])
 }
 
-func (ws *nativeWSConn) readClientFrame() (byte, []byte, error) {
+// readClientMessage 读取一条完整的客户端消息,按 RFC 6455 重组分片的数据帧。
+// 旧实现把 continuation 帧(0x0)当作独立消息直接写入 PTY、把分片文本控制消息的
+// 首帧当完整消息丢弃,导致分片客户端的输入/控制错乱。控制帧不可分片但允许穿插
+// 在数据分片之间:ping/pong 就地处理并继续累积,close 返回给调用方关闭连接。
+// 返回的 opcode 取首个分片的操作码。
+func (ws *nativeWSConn) readClientMessage() (byte, []byte, error) {
+	var firstOpcode byte
+	var buf []byte
+	// 分片状态必须用独立布尔跟踪,不能以 buf==nil 判定:空的首分片经
+	// append([]byte(nil), 空...) 仍为 nil,若据此判定会把后续全部延续帧
+	// 误判为"孤立延续帧"丢弃,整条合法分片消息静默丢失。
+	var inFragment bool
 	for {
-		header := make([]byte, 2)
-		if _, err := io.ReadFull(ws.br, header); err != nil {
+		opcode, fin, payload, err := ws.readClientFrame()
+		if err != nil {
 			return 0, nil, err
 		}
-		opcode := header[0] & 0x0f
-		masked := header[1]&0x80 != 0
-		length := uint64(header[1] & 0x7f)
-		switch length {
-		case 126:
-			ext := make([]byte, 2)
-			if _, err := io.ReadFull(ws.br, ext); err != nil {
-				return 0, nil, err
-			}
-			length = uint64(binary.BigEndian.Uint16(ext))
-		case 127:
-			ext := make([]byte, 8)
-			if _, err := io.ReadFull(ws.br, ext); err != nil {
-				return 0, nil, err
-			}
-			length = binary.BigEndian.Uint64(ext)
+		switch opcode {
+		case 0x8:
+			// 关闭帧:无论是否处于分片中,直接交回调用方结束连接。
+			return opcode, payload, nil
+		case 0x9:
+			// ping 可穿插在分片间:就地回 pong 并继续读取后续分片。
+			_ = ws.writeFrame(0xA, payload)
+			continue
+		case 0xA:
+			// 穿插的 pong:忽略并继续读取。
+			continue
 		}
-		if length > 1<<20 {
-			return 0, nil, fmt.Errorf("websocket frame too large: %d", length)
+		if opcode >= 0xB {
+			// 0xB-0xF 为协议保留控制帧:忽略。
+			continue
 		}
-		var mask [4]byte
-		if masked {
-			if _, err := io.ReadFull(ws.br, mask[:]); err != nil {
-				return 0, nil, err
+		// 以下为数据帧(0x1 文本 / 0x2 二进制 / 0x0 延续;0x3-0x7 保留)。
+		if !inFragment {
+			if opcode == 0x0 {
+				// 无前导帧的孤立延续帧:忽略。
+				continue
 			}
-		}
-		payload := make([]byte, length)
-		if length > 0 {
-			if _, err := io.ReadFull(ws.br, payload); err != nil {
-				return 0, nil, err
+			if opcode > 0x2 {
+				// 保留的数据帧操作码:忽略。
+				continue
 			}
-		}
-		if masked {
-			for i := range payload {
-				payload[i] ^= mask[i%4]
+			firstOpcode = opcode
+			if fin {
+				return firstOpcode, payload, nil
 			}
+			buf = append([]byte(nil), payload...)
+			inFragment = true
+			continue
 		}
-		return opcode, payload, nil
+		if opcode != 0x0 {
+			// 分片中又出现新的数据帧(协议违规):丢弃半成品分片,改从新帧重新跟踪。
+			firstOpcode = opcode
+			if fin {
+				return firstOpcode, payload, nil
+			}
+			buf = append([]byte(nil), payload...)
+			continue
+		}
+		buf = append(buf, payload...)
+		if len(buf) > 1<<20 {
+			return 0, nil, fmt.Errorf("websocket message too large: %d", len(buf))
+		}
+		if fin {
+			return firstOpcode, buf, nil
+		}
 	}
+}
+
+// readClientFrame 读取单个原始帧,返回操作码、FIN 位与载荷。
+func (ws *nativeWSConn) readClientFrame() (byte, bool, []byte, error) {
+	// 半开连接保护:每读一帧前设置读空闲超时,收到任何帧后续期;
+	// 客户端断电后读协程最多再等一个超时周期即退出,
+	// 连接随之关闭,PTY shell 由 shell.close() 清理。
+	if err := ws.conn.SetReadDeadline(time.Now().Add(nativeConsoleReadTimeout)); err != nil {
+		return 0, false, nil, err
+	}
+	header := make([]byte, 2)
+	if _, err := io.ReadFull(ws.br, header); err != nil {
+		return 0, false, nil, err
+	}
+	opcode := header[0] & 0x0f
+	fin := header[0]&0x80 != 0
+	masked := header[1]&0x80 != 0
+	length := uint64(header[1] & 0x7f)
+	switch length {
+	case 126:
+		ext := make([]byte, 2)
+		if _, err := io.ReadFull(ws.br, ext); err != nil {
+			return 0, false, nil, err
+		}
+		length = uint64(binary.BigEndian.Uint16(ext))
+	case 127:
+		ext := make([]byte, 8)
+		if _, err := io.ReadFull(ws.br, ext); err != nil {
+			return 0, false, nil, err
+		}
+		length = binary.BigEndian.Uint64(ext)
+	}
+	if opcode >= 0x8 && length > 125 {
+		// RFC 6455 §5.5:控制帧载荷不得超过 125 字节。接受超大 ping
+		// 并原样回 pong 会发出超限控制帧,严格客户端按帧错误断连。
+		return 0, false, nil, fmt.Errorf("websocket control frame too large: %d", length)
+	}
+	if length > 1<<20 {
+		return 0, false, nil, fmt.Errorf("websocket frame too large: %d", length)
+	}
+	var mask [4]byte
+	if masked {
+		if _, err := io.ReadFull(ws.br, mask[:]); err != nil {
+			return 0, false, nil, err
+		}
+	}
+	payload := make([]byte, length)
+	if length > 0 {
+		if _, err := io.ReadFull(ws.br, payload); err != nil {
+			return 0, false, nil, err
+		}
+	}
+	if masked {
+		for i := range payload {
+			payload[i] ^= mask[i%4]
+		}
+	}
+	return opcode, fin, payload, nil
 }
 
 func (ws *nativeWSConn) writeBinary(payload []byte) error {
@@ -564,6 +392,12 @@ func (ws *nativeWSConn) writeClose() error {
 func (ws *nativeWSConn) writeFrame(opcode byte, payload []byte) error {
 	ws.mu.Lock()
 	defer ws.mu.Unlock()
+
+	// 写超时保护:客户端发送窗口堵死时不能无限阻塞写端,
+	// 否则会拖住 PTY 输出协程与登录回显。
+	if err := ws.conn.SetWriteDeadline(time.Now().Add(nativeConsoleWriteTimeout)); err != nil {
+		return err
+	}
 
 	header := []byte{0x80 | opcode}
 	length := len(payload)
@@ -593,12 +427,12 @@ type nativeConsoleShell struct {
 	cmd    *exec.Cmd
 }
 
-func startNativeConsoleShell() (*nativeConsoleShell, error) {
+func startNativeConsoleShell(rows, cols uint16) (*nativeConsoleShell, error) {
 	master, slave, err := openConsolePTY()
 	if err != nil {
 		return nil, err
 	}
-	setPTYWindowSize(master.Fd(), 32, 120)
+	setPTYWindowSize(master.Fd(), rows, cols)
 
 	shellPath := nativeConsoleShellPath()
 	cmd := exec.Command(shellPath)
@@ -623,6 +457,11 @@ func startNativeConsoleShell() (*nativeConsoleShell, error) {
 	return shell, nil
 }
 
+// close 关闭 PTY 并终止整个 shell 进程组。
+// shell 以 Setsid 启动,自身是新会话/进程组的组长,组号即其 PID;
+// 对 -pid 发信号才能连带的杀掉它拉起的子进程(top、sleep 等),
+// 只杀 shell 本体可能留下孤儿进程继续占用 PTY。
+// 连接超时、客户端断开、登出失败都会走到这里。
 func (s *nativeConsoleShell) close() {
 	if s == nil {
 		return
@@ -631,9 +470,10 @@ func (s *nativeConsoleShell) close() {
 		_ = s.master.Close()
 	}
 	if s.cmd != nil && s.cmd.Process != nil {
-		_ = s.cmd.Process.Signal(syscall.SIGHUP)
+		pid := s.cmd.Process.Pid
+		_ = syscall.Kill(-pid, syscall.SIGHUP)
 		time.Sleep(100 * time.Millisecond)
-		_ = s.cmd.Process.Kill()
+		_ = syscall.Kill(-pid, syscall.SIGKILL)
 	}
 }
 
