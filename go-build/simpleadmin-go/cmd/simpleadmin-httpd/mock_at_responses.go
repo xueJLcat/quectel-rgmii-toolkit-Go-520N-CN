@@ -182,6 +182,12 @@ func mockATResponse(command string) string {
 			return command + "\r\nOK\r\n"
 		}
 		return mockSMSList()
+	case (strings.Contains(upper, "+CPMS") || strings.Contains(upper, "+CSCA")) &&
+		!strings.Contains(upper, "CMGD") && !strings.Contains(upper, "CMGS") && !strings.Contains(upper, "CMGR"):
+		// 短信存储可视化条查询(AT+CPMS 设置/读取与 AT+CSCA?)。列表组合命令
+		// 自带 +CPMS 前缀但已被上面 CMGL 分支接管;删除/发送/读取组合(CMGD/
+		// CMGS/CMGR)同样前置 +CPMS,按内容排除,不抢它们的 default 回显语义。
+		return mockSMSStorageResponse(command)
 	default:
 		return command + "\r\nOK\r\n"
 	}
@@ -393,6 +399,38 @@ func mockSMSList() string {
 	pduCN := buildMockSMSDeliverPDU("10001", "尊敬的用户：您本月的流量已使用80%，详情可登录中国电信APP查询。")
 	pduEN := buildMockSMSDeliverPDU("+10000000000", "SimpleAdmin Windows mock SMS")
 	return fmt.Sprintf("+CMGL: 1,0,,%d\r\n%s\r\n+CMGL: 2,0,,%d\r\n%s\r\nOK\r\n", len(pduCN)/2-1, pduCN, len(pduEN)/2-1, pduEN)
+}
+
+// mockSMSStorageResponse 模拟 AT+CPMS 设置/读取与 AT+CSCA? 查询应答(短信页
+// 存储可视化条数据源)。原型数据与 mockSMSList 一致:ME 2 条(2/255)、SM 空
+// (0/40)。设置形态回 6 字段(三组 used/total)、读取形态回三个带名三元组,
+// 与真机输出一致;+CSCA 回 UCS2 十六进制("+8613800210500",真机在
+// CSCS="UCS2" 下同样返回 hex),覆盖前端 decodeMaybeUcs2 解码路径。
+// 按分号拆分逐段应答,单独执行 AT+CPMS? / AT+CSCA? 时也返回正确形状。
+func mockSMSStorageResponse(command string) string {
+	lines := []string{strings.TrimSpace(command)}
+	mem1 := "ME"
+	for _, part := range splitATCommandParts(sanitizeATCommand(command)) {
+		up := strings.ToUpper(strings.TrimSpace(part))
+		switch {
+		case strings.Contains(up, `+CPMS="SM"`):
+			mem1 = "SM"
+			lines = append(lines, "", "+CPMS: 0,40,2,255,2,255")
+		case strings.Contains(up, `+CPMS="ME"`):
+			mem1 = "ME"
+			lines = append(lines, "", "+CPMS: 2,255,2,255,2,255")
+		case strings.Contains(up, "+CPMS?"):
+			if mem1 == "SM" {
+				lines = append(lines, "", `+CPMS: "SM",0,40,"ME",2,255,"ME",2,255`)
+			} else {
+				lines = append(lines, "", `+CPMS: "ME",2,255,"ME",2,255,"ME",2,255`)
+			}
+		case strings.Contains(up, "+CSCA"):
+			lines = append(lines, "", `+CSCA: "002B0038003600310033003800300030003200310030003500300030",145`)
+		}
+	}
+	lines = append(lines, "", "OK")
+	return strings.Join(lines, "\r\n") + "\r\n"
 }
 
 func mockSMSSendResponse(phoneNumber string) string {

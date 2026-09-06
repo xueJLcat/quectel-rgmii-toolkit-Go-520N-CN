@@ -1,0 +1,11 @@
+{
+  "reload": "重载",
+  "terminalTitle": "模块控制台",
+  "pageDescription": "浏览器内直连模块 PTY 终端，经 WebSocket 二进制帧实时传输。",
+  "statusConnecting": "连接中",
+  "statusConnected": "已连接",
+  "statusDisconnected": "断开",
+  "reconnect": "重新连接",
+  "terminalAria": "模块控制台终端",
+  "consoleFooterHint": "首次进入本页才建立终端连接，离开页面自动断开；「重载」会断开重连并清屏。"
+}

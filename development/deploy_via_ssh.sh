@@ -2,7 +2,7 @@
 # deploy_via_ssh.sh — 经 SSH/SCP 部署 SimpleAdmin Go 到设备(不依赖 adb/Windows)。
 #
 # 流程:本地构建(make arm)→ 远端备份 → 上传安装包 → 执行 install_simpleadmin_go.sh
-#       → 部署后验证 → 验证失败自动回滚备份。
+#       → 部署后验证 → 验证失败自动回滚备份 → 验证通过后删除备份释放空间。
 #
 # 用法:
 #   development/deploy_via_ssh.sh [选项]
@@ -10,6 +10,7 @@
 #     -n, --dry-run     只打印将执行的动作,不实际执行
 #         --skip-build  跳过本地构建(使用现有 simpleadmin-httpd.armv7)
 #         --rollback    不部署,回滚到设备上最近一次部署备份后即退出
+#                       (备份在部署成功后自动删除,仅备份尚存时可用)
 #     -h, --help        帮助
 #
 # 环境变量(均可覆盖):
@@ -22,7 +23,8 @@
 #   - 安装期间 Web 管理界面中断约 5~15 秒;设备的蜂窝网络/DHCP/DNS 由 QCMAP 与
 #     dnsmasq 负责,不受 simpleadmin-httpd 重启影响。
 #   - 备份保存在设备 /usrdata/simpleadmin/.deploy-backup/(二进制 + 上一版前端),
-#     可重复使用 --rollback 恢复。
+#     部署成功后自动删除以释放空间;--rollback 仅在备份尚存
+#     (异常中断/删除失败)时可用。
 #   - 安装脚本可能输出 REBOOT_REQUIRED=1(QCMAP mobileap 配置被修改时),
 #     本脚本只提示、不自动重启设备。
 
@@ -280,6 +282,17 @@ cleanup_staging() {
     fi
 }
 
+# 部署成功后删除设备上的备份,释放 /usrdata 空间(用户要求)。
+# 回滚窗口随之关闭:--rollback 仅在异常中断残留备份时可用。
+cleanup_backup() {
+    if [ "$DRY_RUN" = 1 ]; then
+        log "[dry-run] 将删除设备备份 $REMOTE_BACKUP_DIR"
+        return
+    fi
+    log "部署成功,删除设备备份释放空间 → $REMOTE_BACKUP_DIR"
+    ssh_cpe "rm -rf '$REMOTE_BACKUP_DIR'" || warn "备份删除失败(不影响部署结果),可手动清理"
+}
+
 # ---------------------------------------------------------------- 主流程
 main() {
     log "目标设备: $CPE_USER@$CPE_HOST:$CPE_PORT(密钥: $CPE_SSH_KEY)"
@@ -309,6 +322,7 @@ main() {
     remote_backup
     upload_and_install
     verify_deployment
+    cleanup_backup
     cleanup_staging
 
     log "部署完成: http://$CPE_HOST/ (账号见设备 $REMOTE_INSTALL_DIR/simpleadmin.auth)"

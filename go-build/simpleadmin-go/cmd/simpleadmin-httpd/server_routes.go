@@ -95,6 +95,7 @@ func (s *simpleAdminServer) nativeAPIHandlers() map[string]http.HandlerFunc {
 		"/api/mock_at":             s.handleMockATPayload,
 		"/api/module_model":        s.handleModuleModel,
 		"/api/device_info_data":    s.handleDeviceInfoData,
+		"/api/diag_data":           handleDiagData,
 		"/api/network_data":        s.handleNetworkData,
 		"/api/at_data":             s.handleATData,
 		"/api/network_config_data": s.handleNetworkConfigData,

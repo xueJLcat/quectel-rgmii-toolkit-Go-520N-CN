@@ -1,179 +1,43 @@
 <!doctype html>
 <html data-bs-theme="__SA_THEME__" lang="zh-CN">
-<head>
-<meta charset="utf-8">
-<meta content="width=device-width, initial-scale=1" name="viewport">
-<title>获取中...</title>
-<script>
-(function () {
-  try {
-    var storedTheme = null;
-    try { storedTheme = localStorage.getItem('theme'); } catch (storageError) {}
-    var theme = storedTheme === 'dark' || storedTheme === 'light'
-      ? storedTheme
-      : document.documentElement.getAttribute('data-bs-theme');
-    theme = theme === 'dark' ? 'dark' : 'light';
-    document.documentElement.setAttribute('data-bs-theme', theme);
-    document.documentElement.style.colorScheme = theme;
-  } catch (e) {
-    document.documentElement.setAttribute('data-bs-theme', 'light');
-    document.documentElement.style.colorScheme = 'light';
-  }
-})();
-</script>
-<link href="css/tailwind.css?v=__SA_VERSION__" rel="stylesheet">
-<link href="css/Poppins.css?v=__SA_VERSION__" rel="stylesheet">
-<link href="favicon.ico" rel="icon">
-<script src="js/simpleadmin-lang.js?v=__SA_VERSION__"></script>
-<script src="js/simpleadmin-brand.js?v=__SA_VERSION__"></script>
-<script src="js/simpleadmin-ui.js?v=__SA_VERSION__"></script>
-</head>
-<body>
-<div class="sa-shell">
-<main aria-label="登录" class="sa-panel" style="width:min(92vw,400px);margin:auto">
-<div class="sa-panel-header">
-<div class="sa-brand-mark" data-simpleadmin-brand-mark="1">--</div>
-<div class="sa-brand-title" data-simpleadmin-brand-title="1">获取中...</div>
-</div>
-<div class="sa-panel-body sa-page-app">
-<div class="sa-section-stack">
-<div class="form-text" data-simpleadmin-i18n-key="请输入账号和密码">请输入账号和密码</div>
-<form autocomplete="on" class="sa-section-stack" id="loginForm">
-<div>
-<label class="form-label" data-simpleadmin-i18n-key="用户名" for="username">用户名</label>
-<input autocomplete="username" autofocus class="form-control" id="username" name="username" required type="text">
-</div>
-<div>
-<label class="form-label" data-simpleadmin-i18n-key="密码" for="password">密码</label>
-<input autocomplete="current-password" class="form-control" id="password" name="password" required type="password">
-</div>
-<button class="btn btn-primary" data-simpleadmin-i18n-key="登录" id="loginButton" type="submit">登录</button>
-</form>
-<div class="form-text sa-page-message is-danger" id="loginMessage" role="alert"></div>
-<button class="btn btn-ghost sa-theme-toggle" data-simpleadmin-i18n-key="暗夜模式" id="loginThemeToggle" type="button">暗夜模式</button>
-</div>
-</div>
-</main>
-</div>
-<script>
-(function () {
-  'use strict';
-  const form = document.getElementById('loginForm');
-  const button = document.getElementById('loginButton');
-  const message = document.getElementById('loginMessage');
-  function t(text) {
-    return window.SimpleAdmin && SimpleAdmin.Lang && typeof SimpleAdmin.Lang.t === 'function' ? SimpleAdmin.Lang.t(text) : text;
-  }
-  function nextURL() {
-    const params = new URLSearchParams(window.location.search || '');
-    const value = params.get('next') || '/';
-    return value.startsWith('/') && !value.startsWith('//') ? value : '/';
-  }
-  function consumePostLoginHash() {
-    var hash = '';
-    try {
-      hash = sessionStorage.getItem('simpleadmin.postLoginHash') || '';
-      sessionStorage.removeItem('simpleadmin.postLoginHash');
-    } catch (e) {}
-    return hash;
-  }
-  var rateLimitTimer = null;
-  // 按钮带静态 data-simpleadmin-i18n-key,语言观察器会按该键重译;
-  // 动态文案必须同步更新/移除键属性,否则立即被覆盖回"登录"。
-  function setButtonKey(key) {
-    if (key) button.setAttribute('data-simpleadmin-i18n-key', key);
-    else button.removeAttribute('data-simpleadmin-i18n-key');
-  }
-  function startRateLimitCountdown(seconds) {
-    if (rateLimitTimer) { clearInterval(rateLimitTimer); rateLimitTimer = null; }
-    var remaining = Math.max(1, Math.floor(Number(seconds)) || 1);
-    function render() {
-      message.textContent = t('尝试次数过多，请 ') + remaining + t('秒后重试');
-      setButtonKey(null);
-      button.textContent = remaining + t('秒后可重试');
-    }
-    button.disabled = true;
-    render();
-    rateLimitTimer = setInterval(function () {
-      remaining -= 1;
-      if (remaining <= 0) {
-        clearInterval(rateLimitTimer);
-        rateLimitTimer = null;
-        button.disabled = false;
-        setButtonKey('登录');
-        button.textContent = t('登录');
-        message.textContent = '';
-        return;
-      }
-      render();
-    }, 1000);
-  }
-  form.addEventListener('submit', function (event) {
-    event.preventDefault();
-    if (rateLimitTimer) return;
-    message.textContent = '';
-    button.disabled = true;
-    setButtonKey('登录中...');
-    button.textContent = t('登录中...');
-    fetch('/api/login', {
-      method: 'POST',
-      cache: 'no-store',
-      credentials: 'same-origin',
-      headers: { 'Content-Type': 'application/x-www-form-urlencoded; charset=UTF-8' },
-      body: new URLSearchParams(new FormData(form))
-    }).then(function (response) {
-      return response.json().catch(function () { return {}; }).then(function (data) {
-        if (!response.ok || !data.ok) {
-          var error = new Error(data.error || 'login failed');
-          error.status = response.status;
-          error.retryAfter = (data.retry_after !== undefined && data.retry_after !== null)
-            ? data.retry_after
-            : (response.headers && typeof response.headers.get === 'function' ? response.headers.get('Retry-After') : null);
-          throw error;
+  <head>
+    <meta charset="utf-8" />
+    <meta content="width=device-width, initial-scale=1" name="viewport" />
+    <meta name="sa-version" content="__SA_VERSION__" />
+    <title>登录 — RG520N-CN</title>
+    <script>
+      (function () {
+        try {
+          var stored = null;
+          try {
+            stored = localStorage.getItem("theme");
+          } catch (storageError) {}
+          var theme =
+            stored === "dark" || stored === "light"
+              ? stored
+              : document.documentElement.getAttribute("data-bs-theme");
+          theme = theme === "dark" ? "dark" : "light";
+          document.documentElement.setAttribute("data-bs-theme", theme);
+          document.documentElement.style.colorScheme = theme;
+        } catch (e) {
+          document.documentElement.setAttribute("data-bs-theme", "light");
+          document.documentElement.style.colorScheme = "light";
         }
-        var hash = consumePostLoginHash();
-        window.location.replace(hash ? '/' + hash : nextURL());
-      });
-    }).catch(function (error) {
-      if (error && error.status === 429) {
-        var seconds = Math.floor(Number(error.retryAfter));
-        if (isFinite(seconds) && seconds > 0) {
-          startRateLimitCountdown(seconds);
-        } else {
-          message.textContent = t('尝试次数过多，请稍后重试');
-        }
-        return;
-      }
-      if (error && error.status === 500) {
-        message.textContent = t('服务认证配置异常');
-        return;
-      }
-      if (!error || typeof error.status !== 'number') {
-        message.textContent = t('网络连接失败，请检查网络后重试');
-        return;
-      }
-      message.textContent = t('用户名或密码错误');
-    }).finally(function () {
-      if (rateLimitTimer) return;
-      button.disabled = false;
-      setButtonKey('登录');
-      button.textContent = t('登录');
-    });
-  });
-  function boot() {
-    if (window.SimpleAdmin && SimpleAdmin.UI && typeof SimpleAdmin.UI.initTheme === 'function') {
-      SimpleAdmin.UI.initTheme('#loginThemeToggle');
-    }
-    if (window.SimpleAdmin && SimpleAdmin.Lang && typeof SimpleAdmin.Lang.apply === 'function') {
-      SimpleAdmin.Lang.apply(document);
-    }
-  }
-  if (document.readyState === 'loading') {
-    document.addEventListener('DOMContentLoaded', boot, { once: true });
-  } else {
-    boot();
-  }
-})();
-</script>
-</body>
+      })();
+    </script>
+    <link href="/css/Poppins.css" rel="stylesheet" />
+    <link href="/favicon.ico" rel="icon" />
+    <script type="module" crossorigin src="/assets/login-NWPIMmdk.js"></script>
+    <link rel="modulepreload" crossorigin href="/assets/react-vendor-DlxAD05o.js">
+    <link rel="modulepreload" crossorigin href="/assets/vendor-QZhhZozn.js">
+    <link rel="modulepreload" crossorigin href="/assets/i18n-f1CstwVF.js">
+    <link rel="modulepreload" crossorigin href="/assets/globals-C5f2QYHX.js">
+    <link rel="modulepreload" crossorigin href="/assets/motion-B9tzJOay.js">
+    <link rel="modulepreload" crossorigin href="/assets/card-OT_mJ63q.js">
+    <link rel="modulepreload" crossorigin href="/assets/label-CQGzxHGh.js">
+    <link rel="stylesheet" crossorigin href="/assets/globals-KHWY-7xW.css">
+  </head>
+  <body>
+    <div id="root"></div>
+  </body>
 </html>

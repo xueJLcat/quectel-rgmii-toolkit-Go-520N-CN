@@ -93,7 +93,18 @@ func TestE2EMockModeServesRealFrontend(t *testing.T) {
 	if strings.Contains(string(body), appVersionPlaceholder) {
 		t.Fatalf("index.html served with unreplaced version placeholder")
 	}
-	for _, asset := range []string{"js/simpleadmin-api.js", "js/simpleadmin-lang.js", "js/simpleadmin-ui.js", "js/simpleadmin-reboot.js", "js/simpleadmin-poll.js", "css/tailwind.css"} {
+	if strings.Contains(string(body), themePlaceholder) {
+		t.Fatalf("index.html served with unreplaced theme placeholder")
+	}
+	if !strings.Contains(string(body), `id="root"`) {
+		t.Fatalf("index.html is not the React SPA shell (missing #root mount point)")
+	}
+	// React(Vite)构建产物文件名带内容哈希:从响应体提取真实引用逐一验证可达
+	assetRefs := regexp.MustCompile(`assets/[^"]+\.(?:js|css)`).FindAllString(string(body), -1)
+	if len(assetRefs) < 2 {
+		t.Fatalf("index.html references %d assets, want >=2 (js+css)", len(assetRefs))
+	}
+	for _, asset := range assetRefs {
 		assetResp, err := client.Get(ts.URL + "/" + asset)
 		if err != nil {
 			t.Fatalf("GET %s: %v", asset, err)

@@ -101,7 +101,7 @@ func isPeriodicRefreshSuppressedATCommand(command string) bool {
 	// 短信列表、信号详情与邻区扫描均为页面专属拉取:不参与周期刷新,
 	// 仅在对应页面请求时执行,降低模块常态 AT 负载。邻区扫描是手动触发
 	// 的一次性测量命令(含 ~3s 超时预算),若按普通读命令参与周期刷新,
-	// 单次扫描后会在最近请求窗口(10 分钟)内每 15 秒被后台重跑一次,
+	// 单次扫描后会在最近请求窗口(2 分钟)内每 15 秒被后台重跑一次,
 	// 持续占用串行 AT 通道,拖慢仪表盘等常驻读取。
 	return isSMSListCommand(command) || isSignalDetailCommand(command) || isNeighbourScanCommand(command)
 }
@@ -115,8 +115,9 @@ func isNeighbourScanCommand(command string) bool {
 }
 
 // isCommonATCacheCommand 判断命令是否属于页面公共缓存命令集合
-// (commonATCacheCommands)。集合内的命令由周期刷新常驻维护,集合外的
-// 命令(如终端里手动敲的一次性命令)仅在最近被请求过时才参与刷新。
+// (commonATCacheCommands)。集合身份只决定空闲驱逐豁免与启动预热选取;
+// 周期刷新资格一律按最近请求窗口判定(见 isATCacheRefreshEligible),
+// 集合内外命令无人查看时都不再后台重跑。
 func isCommonATCacheCommand(command string) bool {
 	command = sanitizeATCommand(command)
 	for _, candidate := range commonATCacheCommands() {
@@ -127,14 +128,16 @@ func isCommonATCacheCommand(command string) bool {
 	return false
 }
 
-// isATCacheRefreshEligible 判断过期条目是否允许参与周期刷新:页面公共命令
-// 始终参与;其余命令仅在最近请求窗口内被请求过时参与,避免一次性手动命令
-// 变成永久刷新任务。历史路径或测试直接构造的条目 lastRequested 为零值,
-// 按最近请求对待以保持既有刷新语义(生产环境所有条目都会经请求路径设置
-// lastRequested)。
+// isATCacheRefreshEligible 判断过期条目是否允许参与周期刷新:所有命令
+// (含页面公共命令)一律要求最近请求窗口内被 Fetch 过——页面打开时前端
+// 轮询持续续热;关闭页面后后台刷新最多一个窗口内停摆,空闲态只保留
+// 短信转发 webhook 与自动化(看门狗/定时重启/时间同步)等允许的常驻
+// 服务流量。公共命令的零值条目(启动预热后从未被页面请求)视为无人
+// 查看,不参与刷新;非公共零值条目为历史路径或测试直接构造,保持原有
+// 刷新语义(生产环境所有条目都会经请求路径设置 lastRequested)。
 func isATCacheRefreshEligible(command string, lastRequested time.Time) bool {
 	if isCommonATCacheCommand(command) {
-		return true
+		return !lastRequested.IsZero() && time.Since(lastRequested) < atCacheRecentRequestWindow
 	}
 	if lastRequested.IsZero() {
 		return true

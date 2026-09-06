@@ -86,10 +86,13 @@ func isPublicAuthPath(path string) bool {
 	case "/login.html", "/logout.html", "/api/login", "/api/logout", "/api/module_model", "/favicon.ico":
 		return true
 	}
-	// 登录页自身的静态资源放行:未认证时 /css/、/fonts/ 若被 302 成登录页
-	// HTML,登录页会字体降级、样式错乱。仅放行这两个静态资源前缀
-	// (favicon.ico 已在上方按精确路径放行)。
-	return strings.HasPrefix(path, "/css/") || strings.HasPrefix(path, "/fonts/")
+	// 登录页自身的静态资源放行:未认证时 /css/、/fonts/、/assets/ 若被 302 成登录页
+	// HTML,登录页会字体降级、样式错乱甚至脚本失效。/assets/ 为 React 前端(Vite)
+	// 的内容寻址构建产物(JS/CSS 分块),登录页与主应用共用,不含会话数据;
+	// index.html 等 HTML 入口仍受会话保护(favicon.ico 已在上方按精确路径放行)。
+	return strings.HasPrefix(path, "/css/") ||
+		strings.HasPrefix(path, "/fonts/") ||
+		strings.HasPrefix(path, "/assets/")
 }
 
 func (s *simpleAdminServer) handleLoginPage(w http.ResponseWriter, r *http.Request) {

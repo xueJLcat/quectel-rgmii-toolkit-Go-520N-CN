@@ -20,8 +20,12 @@ const (
 	atCachePeriodicInterval  = 15 * time.Second
 	atCacheFirstRefreshDelay = 500 * time.Millisecond
 	atCacheBootGracePeriod   = 35 * time.Second
-	// 非页面命令只在最近请求窗口内参与周期刷新,超过空闲阈值后从缓存淘汰。
-	atCacheRecentRequestWindow = 10 * time.Minute
+	// 周期刷新最近请求窗口:页面公共命令与非页面命令一律只在窗口内被
+	// Fetch 请求过才参与周期刷新——页面打开时前端轮询(最慢 60s 一条)
+	// 持续续热,关闭页面/收起标签后后台刷新最多再持续一个窗口即停摆,
+	// 空闲态 AT 通道与 CPU 只保留短信转发与自动化等允许的常驻服务。
+	// 窗口须大于最慢前端轮询周期;条目淘汰仍由 atCacheIdleEvictAfter 独立控制。
+	atCacheRecentRequestWindow = 2 * time.Minute
 	atCacheIdleEvictAfter      = 15 * time.Minute
 	// worker 无可执行命令时的轮询间隔,等待保护期结束,避免忙等。
 	atCacheWorkerIdleSleep = 500 * time.Millisecond

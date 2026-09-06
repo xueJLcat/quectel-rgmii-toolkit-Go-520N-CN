@@ -1,0 +1,21 @@
+{
+  "failedToLoadDeviceInfo": "Failed to load device info",
+  "manufacturer": "Manufacturer",
+  "modelName": "Model Name",
+  "firmwareVersion": "Firmware Version",
+  "phoneNumber": "Phone Number",
+  "lanIp": "LAN IP",
+  "wanIpv": "WAN IPv",
+  "version": "Version",
+  "noSim": "No SIM",
+  "noPhoneNumberAvailable": "No phone number available",
+  "imei": "IMEI",
+  "imsi": "IMSI",
+  "iccid": "ICCID",
+  "simStatus": "SIM Status",
+  "simInserted": "SIM Inserted",
+  "simUnknown": "Unknown",
+  "wanIpv4": "WAN IPv4",
+  "wanIpv6": "WAN IPv6",
+  "codeRepository": "Code Repository"
+}

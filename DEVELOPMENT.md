@@ -2,7 +2,7 @@
 
 > 面向后续迭代开发者(含 AI 代理)。覆盖架构、约定、构建、测试、部署与固件事实。
 > 配套文档:[DEPLOY.md](DEPLOY.md)(部署细则与验收清单)、[AT_PROXY.md](AT_PROXY.md)(AT 代理协议,供外部程序解析)。
-> 最后更新:2026-09-01(界面偏好新增默认主题设置;基于设备 192.168.5.1 实机验证)。
+> 最后更新:2026-09-06(前端切换为 React 19 + Vite + Tailwind v4 + shadcn/ui 构建管线;后端新增网络诊断与防火墙 IPv6/DNAT 端口转发)。
 
 ## 1. 项目概述
 
@@ -10,7 +10,9 @@ SimpleAdmin 是 Quectel RG520N-CN 5G CPE(高通 SDX65 平台)的 Web 管理系�
 
 - **后端**:`simpleadmin-httpd`,Go 单体服务(静态编译、无外部依赖),运行于设备 `:80`。
   独占唯一 AT 通道 `/dev/smd11`,经 Unix Socket 代理对外暴露受限 AT 执行能力。
-- **前端**:Vue 3(全局构建 `vue.global.prod.js`)+ 自研模块系统 + Tailwind CSS v4,纯静态文件由后端托管。
+- **前端**:React 19 + TypeScript + Vite + Tailwind CSS v4 + shadcn/ui,源码在
+  `development/simpleadmin/frontend-react/`,构建产物同步到 `development/simpleadmin/www/`
+  提交入库,纯静态文件由后端托管。
 - **设备环境**:Linux armv7,systemd;`/usrdata` 与 `/etc` 同为可写 ubifs 卷,rootfs 只读。
 - 设备档案见运维资料库 `/opt/cpe-doc`(01 设备档案 / 02 Shell 接入 / 03 AT 通道)。
 
@@ -22,7 +24,8 @@ SimpleAdmin 是 Quectel RG520N-CN 5G CPE(高通 SDX65 平台)的 Web 管理系�
 ├── www/                       # 前端静态文件(config/ 内为界面语言/默认主题配置)
 ├── simpleadmin.auth           # 登录凭据(username:password,0600,升级保留)
 ├── at_devices.conf            # AT 设备列表(/dev/smd11)
-├── firewall_ports.conf        # 防火墙规则状态文件
+├── firewall_ports.conf        # 防火墙阻止/放行规则状态文件
+├── firewall_fwd.conf          # DNAT 端口转发规则状态文件
 ├── mac_bind.conf              # DHCP 静态租约状态文件(本服务下发记录)
 ├── dns_upstream.conf          # 自定义上游 DNS 状态文件
 ├── ttlvalue                   # TTL 状态
@@ -50,10 +53,10 @@ quectel-rgmii-toolkit-Go/
 │   │   ├── systemd/simpleadmin-httpd.service
 │   │   ├── simplepasswd
 │   │   └── mobileap_bridge0_mac.sh
-│   └── simpleadmin/frontend/       # Tailwind 源码(input.css + src/components-*.css)
+│   └── simpleadmin/frontend-react/ # React 前端源码(Vite 构建,产物同步进 www/)
 ├── go-build/simpleadmin-go/        # Go 模块(模块名含 ./cmd/simpleadmin-httpd)
 │   └── cmd/simpleadmin-httpd/      # 全部后端代码(单 package main)
-└── windows-test/                   # Windows 预览构建 + frontend_smoke.js
+└── windows-test/                   # Windows 预览构建(mock 模式本地测试)
 ```
 
 ## 3. 后端架构(package main)
@@ -152,78 +155,154 @@ quectel-rgmii-toolkit-Go/
 - 读请求后统一设写时限(10s),防半开连接泄漏协程。
 - 预算关系:锁等待 200s + 执行 180s ≤ at-client 交换超时 400s。
 
-## 4. 前端架构
+## 4. 前端架构(React)
 
-### 4.1 模块系统
+源码在 `development/simpleadmin/frontend-react/`:React 19 + TypeScript + Vite + Tailwind CSS v4 + shadcn/ui。
+旧 Vue3 无构建 SPA(`www/js/*`、`window.SimpleAdmin` 命名空间)与旧 Tailwind 源码目录
+`development/simpleadmin/frontend/` 已全部退役删除。
 
-- 命名空间 `window.SimpleAdmin`:`Api` / `UI` / `Lang` / `Reboot` / `Poll` / `Brand` /
-  `Text` / `Time` / `Sms` / `MockAT` / `Logout` / `Pages`。
-- 装配顺序 = `windows-test/frontend_smoke.js` 的 `FILES` 数组(与 `index.html` 加载顺序一致);
-  **新增模块文件必须同步加入两处**,否则冒烟测试失败。
-- SPA 模式(`SimpleAdminSpaMode`):页面脚本只向 `SimpleAdmin.Pages` 注册工厂,
-  由 `simpleadmin-spa.js` 按 hash 路由挂载/卸载;每页 `init()` 在激活时调用。
-- 所有 `/api/*` 请求经 `simpleadmin-api.js` 的 **WebSocket 网关**(`/api/ws`),
-  非直连 HTTP;新增 API 封装加在 `SimpleAdmin.Api`。
+### 4.1 目录结构
 
-### 4.2 页面结构约定
+```
+frontend-react/
+├── index.html / login.html     # Vite MPA 双入口(保留 __SA_VERSION__/__SA_THEME__ 占位符)
+├── vite.config.ts              # 双入口构建 + manualChunks 分包 + dev proxy
+├── src/
+│   ├── app/                    # App.tsx / LoginApp.tsx / providers.tsx / routes.tsx(导航单一来源)
+│   ├── lib/
+│   │   ├── api/                # gateway.ts(/api/ws 网关)+ endpoints.ts(API 封装)+ auth.ts
+│   │   ├── i18n/               # react-i18next + locales/{zh-CN,en}/ 18 个命名空间 JSON
+│   │   ├── theme/              # 亮暗主题读写
+│   │   └── utils.ts
+│   ├── components/
+│   │   ├── ui/                 # shadcn/ui 基础组件
+│   │   ├── layout/             # 侧栏/顶栏/页面骨架
+│   │   ├── common/             # 空态/错误重试/危险区等跨页组件
+│   │   └── charts/             # ECharts 按需封装
+│   ├── features/<id>/          # 16 个功能域:page.tsx + hooks.ts + lib.ts + components/
+│   ├── stores/                 # zustand:ui / confirm / reboot
+│   └── styles/                 # tokens.css(设计令牌)+ globals.css(Tailwind 入口)
+├── e2e/                        # Playwright 端到端测试(make web-e2e)
+└── scripts/                    # sync-www.sh(dist→www 同步)+ migrate-i18n.mjs(迁移溯源)
+```
 
-- 模板在 `www/index.html`(单文件,`<section data-page="xxx">` × 12);
-  逻辑在 `www/js/pages/<page>.js`(工厂返回 data + methods)。
-- 模板引用的每个字段/方法必须在工厂中定义(冒烟测试 + 交叉核对会检查)。
-- 面板范式:`.sa-panel` > `.sa-panel-header` + `.sa-panel-body` > `.sa-section-stack`;
-  表格 `.table.sa-table`;增删行 `.sa-inline-control`;空态 `.sa-empty-state`;
-  说明 `.form-text`。**优先复用现有类,新增类需改 Tailwind 源码并 `make css`**。
-- 交互范式:
-  - 所有操作反馈用 `SimpleAdmin.UI.notify(type, text)`(右上角 toast),禁用浏览器 alert。
-  - 危险操作前 `SimpleAdmin.UI.confirm({title,message,danger?,onConfirm})`。
-  - 长时操作用 `isLoading`/`isSavingXxx` 锁 + 按钮 `:disabled`,`finally` 复位。
-  - 重启类流程用 `SimpleAdmin.Reboot.request/countdown`;**失败分支必须
-    `SimpleAdmin.Reboot.cancelCountdown()`**(否则倒计时结束会误弹成功提示)。
-  - 加载失败必须有可见失败态 + 重试按钮,**不得静默显示空/默认值**;
-    后台轮询救回数据时要复位失败标志。
-  - 异步刷新要有 `_xxxSeq` 序号守卫,防陈旧响应覆盖(参考 `fetchStatus`)。
+- 16 个 feature 域 = 15 条路由(dashboard/sysmon/signal/network/celllock/netdetail/netconfig/
+  firewall/sms/atcommands/console/diag/automation/settings/deviceinfo)+ login。
+- 路由用 **HashRouter**;`src/app/routes.tsx` 是导航单一来源(菜单/页面标题/浏览器标题/路由 id),
+  feature 页经 `lazy` 懒加载,Vite 按页分 chunk(echarts/xterm/i18n 独立公共 chunk)。
+- 数据层用 **TanStack Query**:查询/变更/轮询集中在各域 `hooks.ts`;
+  全局 UI 状态(侧栏、确认框、重启倒计时)用 **zustand**(`src/stores/`);
+  动画用 motion;toast 用 sonner。
 
-### 4.3 i18n
+### 4.2 API 传输(协议不变)
 
-- 中文为键,`simpleadmin-lang.js` 的 `en` 字典提供翻译;`t(key)` 未知键原样返回。
-- 三类挂载属性:`data-simpleadmin-i18n-key`(文本)/`data-simpleadmin-i18n-placeholder`/
-  `data-simpleadmin-i18n-aria`(aria-label)。
-- 动态文案(含数字)用字典内的**正则翻译器**(如 `第 N 行 DNS 服务器格式无效`),
-  新增动态键必须同时加翻译器。
-- 新增可见中文文案必须补 en 条目;不得产生重复键(有校验)。
+- 所有 `/api/*` 业务请求仍走 **`/api/ws` WebSocket 网关**,协议与旧版一致;
+  客户端实现在 `src/lib/api/gateway.ts`(请求 id 匹配、断线重连退避、单请求超时)。
+- 保活:每 **15 分钟**调一次 `/api/get_uptime`,保持会话与连接活性。
+- 401 处理:把当前 `location.hash` 存入 `sessionStorage` 后跳 `/login.html`,登录成功后回跳原页面。
+- 例外:`/api/module_model` 为公开端点,直接 HTTP fetch(不走网关)。
+- 新增 API 封装统一加在 `src/lib/api/endpoints.ts`,禁止绕过网关直连 HTTP。
 
-### 4.4 样式
+### 4.3 交互约定
 
-- 源码 `development/simpleadmin/frontend/`(input.css + src/components-{base,controls,pages,shell}.css);
-  产物 `www/css/tailwind.css` **提交入库**,设备直接服务。
-- 改样式:`make css` 重新生成并跑 `make css-check`(产物与源码一致性);禁止 `!important`。
+- 操作反馈一律用 toast(sonner),禁用浏览器 alert。
+- 危险操作走 `stores/confirm.ts` 确认框;重启类流程用 `stores/reboot.ts`,
+  **失败分支必须取消倒计时**(否则倒计时结束会误弹成功提示)。
+- 加载失败必须有可见失败态 + 重试按钮,**不得静默显示空/默认值**;
+  后台轮询救回数据时要复位失败标志。
+- 长时操作用 mutation pending 态锁按钮,`finally`/`onSettled` 复位。
+
+### 4.4 i18n
+
+- **react-i18next 命名空间 JSON**:`src/lib/i18n/locales/{zh-CN,en}/` 各 18 个命名空间
+  (common/nav/login + 每个 feature 域一个,含新增 `diag`);命名空间经 `locales/manifest.json` 注册。
+- 新增可见文案必须在同一命名空间的 zh-CN 与 en **成对增键**,不得只加一边。
+- 迁移脚本 `scripts/migrate-i18n.mjs`:从旧 `www/js/simpleadmin-lang.js` 生成命名空间 JSON;
+  源字典已随旧管线退役,脚本保留作键溯源。
+- 语言持久化:`localStorage` + 后端 `/api/set_language`(设备级配置 `www/config/get_language.json`)。
+
+### 4.5 主题与占位符
+
+- 亮暗主题经 `lib/theme` + `data-bs-theme` 属性;设备级默认主题存 `www/config/get_theme.json`。
+- 占位符契约(服务端响应时替换,**源码与构建产物必须保留字面量**):
+  - `__SA_VERSION__`:新前端经 `<meta name="sa-version">` 读取。
+  - `__SA_THEME__`:位于入口 HTML 的 `data-bs-theme`,配合防闪脚本,
+    无本地主题记录的浏览器首屏即按设备默认主题渲染。
+- 认证白名单含 **`/assets/` 前缀**(Vite 内容寻址产物,登录页依赖,不含会话数据);
+  HTML 入口仍受会话保护——见后端 `server_auth.go` 的 `isPublicAuthPath`。
+
+### 4.6 构建与同步
+
+- 构建链:`frontend-react/` → `npm run build`(tsc --noEmit + vite build)→ `dist/` →
+  `scripts/sync-www.sh` → `development/simpleadmin/www/`(**提交入库**,设备直接服务,运行时无构建)。
+- `sync-www.sh` 清空 www/ 后全量复制,但 **`www/config/` 整目录保留**(运行时可写区:
+  `get_theme.json`/`get_language.json`);缺失时创建并写入默认值;同步后校验 `www/index.html` 存在。
+- 体积预算:www 由约 824KB 增至约 2.2MB(React+ECharts+xterm 分包 + 路由级懒加载);
+  `make web-size` 检查初始壳层/echarts chunk/xterm chunk/总量四道预算闸门,任一超标即失败。
+  LAN 场景(本地加载、不走公网)的权衡已在设计文档记录。
+
+### 4.7 测试策略
+
+- 单元/组件测试:**vitest + @testing-library/react**(jsdom),测试文件与源码同目录 `*.test.ts(x)`;
+  解析/校验纯函数抽在各域 `lib.ts` 便于独立测试。`make web-test` = typecheck + lint + vitest。
+- 端到端:**Playwright**(`e2e/`,`make web-e2e`);webServer 自起 `make dev-mock`
+  (linux 原生 mock 二进制,:18080)。
+- 旧 `windows-test/frontend_smoke.js`(模块装配冒烟)已删除,由 vitest + Playwright 取代。
+
+### 4.8 开发回路
+
+```
+make dev-mock-build && make dev-mock   # linux 原生 mock 后端 :18080
+make web-dev                           # Vite dev server :5173,/api 与 /console 代理到 :18080(含 WS)
+```
+
+Windows 侧等价 mock 后端为 `run_windows_test.bat`。开发时 dev server 热更新即时生效;
+提交前跑 `make web-test`/`make web-size`,再 `make web` 同步产物入库。
+
+### 4.9 新增页面流程
+
+1. `src/features/<id>/page.tsx`:页面组件 **default export**(按需配 `hooks.ts`/`lib.ts`/`components/`)。
+2. `src/app/routes.tsx`:在 `PAGES` 表注册(id/path/groupId/icon/titleKey/lazy)。
+3. `locales/{zh-CN,en}/<id>.json`:双语**成对增键**,并在 `manifest.json` 注册命名空间。
+4. `src/lib/api/endpoints.ts`:新增 API 封装(经网关)。
+5. 验证:`make web-test` + `make web-size`;涉及新路由/关键交互补 `e2e/` 用例跑 `make web-e2e`。
 
 ## 5. 构建与验证
 
 ```
+make all          # 默认目标(arm + windows)
 make arm          # ARMv7 交叉编译 → development/simpleadmin/simpleadmin-httpd.armv7
 make windows      # Windows amd64 预览版 → windows-test/bin/
 make test         # Go 全量单测(-count=1)
 make vet          # go vet
 make fmt-check    # gofmt -l 必须无输出
-make smoke        # 前端模块装配冒烟(需 node)
-make css          # Tailwind 构建(改前端源码后)
-make css-check    # Tailwind 产物一致性校验
+make clean        # 清理产物
+make web-build    # 只构建前端(frontend-react → dist)
+make web          # 构建 + sync-www.sh 同步 www/(保留 www/config/)
+make web-test     # 前端 typecheck + lint + vitest
+make web-dev      # Vite dev server :5173(/api、/console 代理到 :18080)
+make web-e2e      # Playwright 端到端测试
+make web-size     # www 产物体积预算检查
+make dev-mock-build / make dev-mock   # linux 原生 mock 二进制(:18080)
 ```
 
+(旧 `make smoke` / `make css` / `make css-check` 已随旧前端管线删除。)
+
 - 版本号:`git describe --tags --always --dirty` 注入 `main.appVersion`,
-  服务把 HTML 中 `?v=__SA_VERSION__` 占位符替换为该值(部署验证项之一)。
+  服务把 HTML 中 `__SA_VERSION__` 占位符替换为该值(新前端经 `<meta name="sa-version">`
+  读取;部署验证项之一);`__SA_THEME__` 占位符替换为设备默认主题。
 - 构建参数固定:`-buildvcs=false -trimpath -ldflags "-s -w"`(见 Makefile 注释,勿改)。
 
 ### 提交前检查清单
 
 1. `make test` / `make vet` / `make fmt-check` 全过。
-2. `make smoke` 通过;改动 `index.html` 后跑 div/section 平衡检查。
-3. 改前端文案 → 补 en 字典;改样式 → `make css && make css-check`。
+2. 改前端 → `make web-test` 通过;新增文案在 locales zh-CN/en 成对增键;
+   `make web-size` 预算通过;`make web` 同步并提交 `www/` 产物(`www/config/` 保留,勿手改产物)。
+3. 改路由/关键交互 → 补 Playwright 用例,`make web-e2e` 通过。
 4. 新增 AT 命令 → 检查 `at_cache_policy.go` 分类与 `isATActionCommand` 模式;
    补 `mock_at_responses.go` 的模拟(**按真实固件行为**)。
 5. 新增状态文件 → 补 `runtime` 变量可注入 + 原子写 + 卸载清理。
-6. `GOOS=windows GOARCH=amd64 go build` 通过(验证 stub 完整)。
+6. `make arm windows` 双平台通过(验证 stub 完整与交叉编译)。
 
 ## 6. 测试约定
 
@@ -297,15 +376,16 @@ LAN `192.168.5.1/24`,AT 通道 `/dev/smd11`。
 
 以"新增一个设备能力页面/动作"为例:
 
-1. **实机探查**(只读):`ssh root@192.168.5.1` + `at-client` 验证 AT 语义;
+1. **实机探查**(只读;真机写操作红线见 DEPLOY.md):`ssh root@192.168.5.1` + `at-client` 验证 AT 语义;
    `strings` 固件二进制确认功能归属;确认命令是查询还是动作、失败形态。
 2. **后端**:`page_<x>.go` 加 action(遵循 §3.4 契约)→ `at_cache_policy.go`/
    `isATActionCommand` 归类 → `mock_at_responses.go` 按真实行为模拟 → 纯函数+单测。
 3. **原生层**(如涉及系统命令):`native_<x>.go` + `native_<x>_stub.go` 成对;
    状态文件用原子写 + `runtime` 变量;需要开机自愈的加 reconcile。
-4. **前端**:`index.html` 模板(复用现有类)→ `pages/<x>.js` 工厂 →
-   `simpleadmin-lang.js` en 条目 → 失败态/重试/确认框/序号守卫齐备。
-5. **验证**:`make test vet fmt-check smoke css-check` + `make arm windows`。
+4. **前端**:按 §4.9 流程——`features/<id>/page.tsx`(default export)→ `routes.tsx` 注册 →
+   locales zh-CN/en 成对增键 → `endpoints.ts` 封装 → 失败态/重试/确认框齐备。
+5. **验证**:`make test vet fmt-check` + `make web-test web-size web-e2e` + `make web` +
+   `make arm windows`;写操作路径一律先在 dev-mock(linux)/`run_windows_test.bat`(Windows)验证。
 6. **部署**:首选 `development/deploy_via_ssh.sh`;按 DEPLOY.md 验收;
    出问题时 `--rollback`。
 7. **记录**:固件新事实补本文档 §8;部署/流程变化更新 DEPLOY.md。

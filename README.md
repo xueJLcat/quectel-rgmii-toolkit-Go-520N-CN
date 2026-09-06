@@ -1,6 +1,6 @@
 # SimpleAdmin Go
 
-**SimpleAdmin Go** 是一个面向移远(Quectel)5G CPE 模块的本地化 Web 管理系统,由 **Go 单体后端** + **Vue 3 前端** 组成:后端负责静态页面托管、登录认证、AT 通道、短信、TTL、防火墙、控制台和状态接口;前端提供总览、信号、蜂窝网络、网络设置、防火墙、短信、AT 命令、控制台、系统监控等页面。整个系统离线打包,通过 Windows 批处理经 ADB **一键安装**到模块,无需模块联网、无需外部依赖。
+**SimpleAdmin Go** 是一个面向移远(Quectel)5G CPE 模块的本地化 Web 管理系统,由 **Go 单体后端** + **React 19 前端**(Vite + Tailwind CSS v4 + shadcn/ui 构建)组成:后端负责静态页面托管、登录认证、AT 通道、短信、TTL、防火墙、网络诊断、控制台和状态接口;前端提供总览、信号、蜂窝网络、网络设置、防火墙、短信、AT 命令、控制台、网络诊断、系统监控等页面。整个系统离线打包,通过 Windows 批处理经 ADB **一键安装**到模块,无需模块联网、无需外部依赖。
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 ![Go](https://img.shields.io/badge/Go-1.22+-00ADD8?logo=go&logoColor=white)
@@ -22,12 +22,13 @@
 | 小区锁定 | 按物理小区标识(PCI)锁小区、锁频点,一键锁定当前服务小区 |
 | 网络详情 | WAN / LAN 地址、各接口状态(MTU、累计流量、实时速率)、局域网在线设备与租期 |
 | 网络设置 | IP 透传、DNS 代理(IPv4 / IPv6、自定义上游 DNS)、USB 网卡模式(RMNET 等)、LAN IP 网段、DHCP 静态绑定(MAC–IP) |
-| 防火墙 | 端口放行 / 阻止规则、DMZ、完整 iptables 规则命中统计,配置持久化、重启自动恢复 |
-| 短信服务 | 收件箱、发送短信(PDU 编码)、短信 Webhook 通知 |
+| 防火墙 | 端口放行 / 阻止规则、DMZ、DNAT 端口转发(事务式应用、持久化、重启自动恢复)、IPv4 / IPv6 完整规则命中统计 |
+| 网络诊断 | 互联网连通性 HTTP 探测(状态码 / 延迟)与 DNS 解析查询(可指定上游 DNS 服务器) |
+| 短信服务 | 收件箱、发送短信(PDU 编码)、短信存储用量可视化(SM / ME 存储与短信中心号码、CMS 错误码释义)、短信 Webhook 通知 |
 | AT 命令 | Web 端直接发送 AT 命令并查看原始返回 |
 | 控制台 | Web Shell,复用后台登录会话,进入即开终端 |
 | 自动化 | 定时任务调度 |
-| 系统监控 | TTL 设置与系统指标监控 |
+| 系统监控 | TTL 设置、系统指标监控(CPU / 内存 / 负载 / 进程 Top 20)与温度传感器面板(AT+QTEMP 17 路) |
 | 系统设置 | 账号密码、界面语言、亮 / 暗主题 |
 | 设备信息 | 模块型号、固件版本、IMEI 等设备信息,支持重启操作 |
 
@@ -109,12 +110,12 @@ quectel-rgmii-toolkit-Go/
 ├── toolkit.bat                 # Windows 一键安装入口
 ├── uninstall.bat               # Windows 一键卸载入口
 ├── run_windows_test.bat        # Windows 本地预览测试入口(--mock 模式)
-├── Makefile                    # 构建入口(make arm / windows / test ...)
-├── .github/workflows/ci.yml    # CI:格式检查、静态分析、单测、样式一致性
+├── Makefile                    # 构建入口(make arm / windows / test / web ...)
+├── .github/workflows/ci.yml    # CI:Go 格式检查/静态分析/单测 + 前端 typecheck/lint/vitest/build/体积检查/Playwright
 ├── adb.exe / AdbWin*.dll       # Windows ADB 工具
-├── development/                # 模块端安装包(安装/卸载脚本、ARMv7 二进制、前端产物)
+├── development/                # 模块端安装包(安装/卸载脚本、ARMv7 二进制、前端产物 www/)与 React 前端源码 frontend-react/
 ├── go-build/simpleadmin-go/    # Go 后端源码(单 package main)
-├── windows-test/               # Windows 预览构建与前端冒烟测试
+├── windows-test/               # Windows 预览构建与本地 mock 测试
 └── PNG/                        # 界面截图
 ```
 
@@ -122,7 +123,7 @@ quectel-rgmii-toolkit-Go/
 
 ## 构建与开发
 
-依赖:Go(版本取自 `go-build/simpleadmin-go/go.mod`)、Node.js 20(仅前端冒烟测试需要)。
+依赖:Go(版本取自 `go-build/simpleadmin-go/go.mod`)、Node.js 22(前端构建与测试需要)。
 
 ```sh
 make arm          # 交叉编译 ARMv7 设备端二进制
@@ -130,9 +131,12 @@ make windows      # 编译 Windows 预览版
 make test         # Go 全量单元测试(含 e2e mock)
 make vet          # go vet 静态分析
 make fmt-check    # gofmt 格式检查
-make smoke        # 前端模块装配冒烟测试
-make css          # 构建 Tailwind 样式
-make css-check    # 样式产物一致性检查
+make web          # 构建 React 前端并同步 www/(保留 www/config/)
+make web-test     # 前端 typecheck + lint + vitest
+make web-e2e      # Playwright 端到端测试
+make web-size     # www 产物体积预算检查
+make web-dev      # Vite dev server(:5173,/api 代理到 :18080)
+make dev-mock     # linux 原生 mock 后端(:18080)
 make clean        # 清理产物
 ```
 

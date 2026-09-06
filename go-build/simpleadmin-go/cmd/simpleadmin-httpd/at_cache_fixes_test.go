@@ -50,7 +50,7 @@ func TestIdleNonPageCacheEntriesEvicted(t *testing.T) {
 	}
 }
 
-func TestRefreshSelectionRequiresRecentRequestForNonPageCommands(t *testing.T) {
+func TestRefreshSelectionRequiresRecentRequestForAllCommands(t *testing.T) {
 	pageCommand := commonATCacheCommands()[0]
 	mgr := &atCommandCacheManager{entries: map[string]*atCacheEntry{
 		"ATI":       {command: "ATI", response: "OK", updatedAt: time.Now().Add(-time.Hour), lastRequested: time.Now().Add(-atCacheRecentRequestWindow - time.Minute)},
@@ -69,8 +69,24 @@ func TestRefreshSelectionRequiresRecentRequestForNonPageCommands(t *testing.T) {
 	if !set["AT+QRSRP"] {
 		t.Fatalf("recently requested non-page command missing from refresh list: %#v", commands)
 	}
-	if !set[pageCommand] {
-		t.Fatalf("stale page command missing from refresh list despite old lastRequested: %#v", commands)
+	if set[pageCommand] {
+		t.Fatalf("page command not requested within %s must not be refreshed (nobody viewing): %#v", atCacheRecentRequestWindow, commands)
+	}
+
+	// 页面打开(最近请求窗口内被 Fetch 过)时,公共命令保持周期刷新。
+	watched := &atCommandCacheManager{entries: map[string]*atCacheEntry{
+		pageCommand: {command: pageCommand, response: "OK", updatedAt: time.Now().Add(-time.Hour), lastRequested: time.Now()},
+	}}
+	if got := watched.cachedReadCommandsNeedingRefresh(); len(got) != 1 || got[0] != pageCommand {
+		t.Fatalf("recently requested page command missing from refresh list: %#v", got)
+	}
+
+	// 启动预热条目(从未被页面请求,lastRequested 零值)不得成为永久后台刷新任务。
+	warm := &atCommandCacheManager{entries: map[string]*atCacheEntry{
+		pageCommand: {command: pageCommand, response: "OK", updatedAt: time.Now().Add(-time.Hour)},
+	}}
+	if got := warm.cachedReadCommandsNeedingRefresh(); len(got) != 0 {
+		t.Fatalf("never-requested warmup entry must not be refreshed: %#v", got)
 	}
 
 	// 短信列表的既有抑制规则不受最近请求影响。

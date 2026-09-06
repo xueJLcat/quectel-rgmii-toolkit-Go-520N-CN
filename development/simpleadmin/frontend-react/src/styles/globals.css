@@ -1,0 +1,106 @@
+@import "tailwindcss";
+@import "./tokens.css";
+
+@custom-variant dark (&:where([data-bs-theme="dark"], [data-bs-theme="dark"] *));
+
+@theme inline {
+  --font-sans: var(--sa-font);
+  --font-mono: var(--sa-font-mono);
+
+  --color-bg: var(--sa-bg);
+  --color-surface: var(--sa-surface);
+  --color-surface-2: var(--sa-surface-2);
+  --color-surface-3: var(--sa-surface-3);
+  --color-bg-soft: var(--sa-bg-soft);
+  --color-ink: var(--sa-text);
+  --color-soft: var(--sa-text-soft);
+  --color-muted: var(--sa-muted);
+  --color-line: var(--sa-border);
+  --color-line-strong: var(--sa-border-strong);
+
+  --color-accent: var(--sa-accent);
+  --color-accent-soft: var(--sa-accent-soft);
+  --color-accent-2: var(--sa-accent-2);
+  --color-accent-3: var(--sa-accent-3);
+  --color-success: var(--sa-success);
+  --color-warning: var(--sa-warning);
+  --color-danger: var(--sa-danger);
+  --color-info: var(--sa-info);
+  --color-success-soft: var(--sa-success-soft);
+  --color-warning-soft: var(--sa-warning-soft);
+  --color-danger-soft: var(--sa-danger-soft);
+  --color-info-soft: var(--sa-info-soft);
+
+  --color-monitor: var(--sa-domain-monitor);
+  --color-monitor-soft: var(--sa-domain-monitor-soft);
+  --color-network: var(--sa-domain-network);
+  --color-network-soft: var(--sa-domain-network-soft);
+  --color-security: var(--sa-domain-security);
+  --color-security-soft: var(--sa-domain-security-soft);
+  --color-comm: var(--sa-domain-comm);
+  --color-comm-soft: var(--sa-domain-comm-soft);
+  --color-tools: var(--sa-domain-tools);
+  --color-tools-soft: var(--sa-domain-tools-soft);
+  --color-system: var(--sa-domain-system);
+  --color-system-soft: var(--sa-domain-system-soft);
+
+  --radius-sm: var(--sa-radius-sm);
+  --radius-md: var(--sa-radius);
+  --radius-lg: var(--sa-radius-lg);
+
+  --shadow-sm: var(--sa-shadow-sm);
+  --shadow-md: var(--sa-shadow);
+  --shadow-lg: var(--sa-shadow-md);
+  --shadow-xl: var(--sa-shadow-lg);
+
+  --text-xs: var(--sa-text-xs);
+  --text-sm: var(--sa-text-sm);
+  --text-base: var(--sa-text-base);
+  --text-lg: var(--sa-text-lg);
+  --text-xl: var(--sa-text-xl);
+  --text-2xl: var(--sa-text-2xl);
+
+  --ease-sa: var(--sa-ease);
+}
+
+@layer base {
+  html {
+    -webkit-text-size-adjust: 100%;
+  }
+
+  body {
+    background-color: var(--sa-bg);
+    color: var(--sa-text);
+    font-family: var(--sa-font);
+    font-size: var(--sa-text-base);
+    line-height: 1.5;
+    min-height: 100vh;
+  }
+
+  h1 {
+    font-size: var(--sa-text-xl);
+    font-weight: 700;
+    line-height: 1.2;
+  }
+
+  h2,
+  h3 {
+    font-size: var(--sa-text-lg);
+    font-weight: 600;
+    line-height: 1.3;
+  }
+
+  h4 {
+    font-size: var(--sa-text-base);
+    font-weight: 600;
+  }
+
+  :focus-visible {
+    outline: 2px solid var(--sa-accent);
+    outline-offset: 2px;
+  }
+
+  ::selection {
+    background: var(--sa-accent-soft);
+  }
+}

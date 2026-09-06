@@ -22,7 +22,7 @@ Simple_Admin_GO/
 │       ├── simpleadmin-httpd.armv7
 │       ├── simplepasswd
 │       ├── mobileap_bridge0_mac.sh
-│       ├── frontend/
+│       ├── frontend-react/
 │       ├── systemd/simpleadmin-httpd.service
 │       └── www/
 ├── go-build/
@@ -31,7 +31,6 @@ Simple_Admin_GO/
 ├── windows-test/
 │   ├── build_windows_test.bat
 │   ├── run_windows_test.bat
-│   ├── frontend_smoke.js
 │   ├── bin/simpleadmin-httpd-windows-amd64.exe
 │   └── data/
 └── README.md
@@ -169,357 +168,77 @@ Simple_Admin_GO/
 
 ### HTML 页面
 
-`www` 目录只保留实际使用的 `index.html` 和 `login.html`，不再保留网络、设置、短信、设备信息或注销用的兼容跳转 HTML 文件。
+`www` 目录是 `development/simpleadmin/frontend-react/` 的 **Vite 构建产物**（经 `make web` 同步并提交入库），根目录只保留 `index.html` 和 `login.html` 两个 HTML 入口。
 
 | 文件 | 功能 |
 |---|---|
-| `index.html` | 登录成功后的单页管理界面入口，使用左侧菜单切换总览、信号详情、蜂窝网络、小区锁定、网络详情、网络设置、防火墙、短信服务、AT 命令、控制台、自动化、系统监控、系统设置、设备信息内容区（监控/网络/通信/工具/系统五组）；页面切换时使用非滚动方式在内容显示前直接重置全部滚动容器，让新页面直接从最顶端显示，标题、面板、表格行和短信摘要行会按顺序渐进显示，渐进显示期间只临时隐藏内容框内部滚动条，页面全局右侧滚动条保持显示，避免加载动画阶段内容框出现临时滚动条，刷新后也直接显示顶端且不保留上次滚动位置，并遵守系统“减少动态效果”设置；浅色模式/暗夜模式切换按钮放在每个内容页标题栏右侧，不再在菜单或标题栏上方单独占用一整行主题切换栏；内容区统一为纵向排版并跟随页面可用宽度铺开，首页顶部使用同一行四部分自适应布局，依次显示 CPU 半圆仪表盘、RAM 半圆仪表盘、RSRQ/RSRP/SINR 三个 4G/5G 信号进度条大框，以及一个合并大卡片，卡片内部竖排显示温度数值、信号百分比数值和互联网连接状态；CPU/RAM 仪表盘参考圆弧仪表样式，百分比和说明文字均在卡片中居中显示；首页总信号百分比按 RSRP 50%、RSRQ 25%、SINR 25% 加权计算，其中 RSRP 按 -120 到 -80、RSRQ 按 -20 到 -8、SINR 按 0 到 20 映射为百分比；首页将网络信息和信号信息合并到同一个“网络信息”面板，内容区“激活 SIM”行显示为“已激活卡1”这类完整状态，信号评估位于速率下方，在线时长位于面板数据列表最下方，刷新频率设置和更新时间位于面板底部并保持单行显示，刷新频率为空输入时保持原值（2-60 秒内取值并记忆到本地存储），数据请求失败时不刷新「更新时间」；首页停留在当前页面时才自动刷新首页数据，离开首页后停止刷新；首页“网络信息”标题后带有“精简显示/完整显示”按钮，设备信息页和首页只在当前页面可见时自动刷新，设置页不再自动请求或依赖设备信息接口，精简显示时整行隐藏 MCCMNC、CELL ID、eNB ID 和 TAC，并通过本地存储记住状态；首页和设备信息页的数据行改为接近系统信息页的整宽信息表，字段名称在左侧，字段数据以最长数据行形成的公共数据列为基准整体放在页面中间区域，并在该列内靠左显示；小区锁定页 LTE 手动小区锁定在未填写“小区数量”时不显示 EARFCN/PCI 输入框，填写 1-10 后按数量显示对应输入行；蜂窝网络页“网络工具”中的 APN、IP 协议类型、选择首选网络、NR5G 模式控制四项在同一横排显示；蜂窝网络页频段锁定区域横排三等分显示 LTE、NR5G-NSA、NR5G-SA 三个模式，每个模式独立显示可用频段复选框，并提供当前模式的“锁定”和“全部选中/取消选中”按钮，三列下方只保留一个全局“恢复全部”按钮用于恢复全部 LTE/NSA/SA 可用频段；蜂窝网络页获取到模块型号并映射出当前可用频段后，立即发送 `AT+QNWPREFCFG` 查询 LTE/NSA/SA 当前已锁定频段并回填勾选状态；小区锁定页的小区扫描“开始扫描 / 锁定 / 清除”按钮保持同一行显示；设置页不提供 HTTPS 证书或 CA 下载入口，管理界面默认通过 HTTP 访问；网络设置页顶部为“当前状态”概览徽章行，依次显示 IP 透传、USB 协议、DNS V4、DNS V6、DMZ 和 LAN IP 段的当前状态，状态未加载时显示“状态获取中...”，获取失败或重试耗尽时显示“状态获取失败”和重试按钮；其下 IP 透传、USB 协议、DNS 代理、DMZ 设置、LAN IP 设置和 TTL 设置六个面板使用左右两竖列显示且两侧面板高度保持一致，DNSv4 和 DNSv6 不显示左侧名称，名称并入启用/禁用按钮，DNSv4 在 DNSv6 前面显示，TTL 状态和值在同一行显示；AT 命令页 AT 终端面板内输出框使用追加式显示，命令输入框支持 ↑/↓ 键翻阅命令历史，“提交 / 复制 / 清除”按钮同一行显示，常用命令和命令历史两个面板使用左右两竖列显示，重置 AT&F 单独放在“危险操作”面板并带二次确认弹窗，各重启/重置/IMEI 确认弹窗统一使用红色确认按钮和灰色取消按钮；系统设置页的设备操作面板包含 AT命令重启、设备重启、关机三个电源动作，每个动作为一行（左侧按钮、右侧说明文字，窄屏时纵向堆叠），且均需二次确认弹窗：AT命令重启经 AT+CFUN=1,1 重启蜂窝模块（约 40 秒倒计时），设备重启经系统 reboot 命令重启整机（约 60 秒倒计时，倒计时文案为“设备重启中…”），关机经系统 poweroff 命令断电，成功后弹出“设备已关机”提示弹窗；设备操作面板其余为 IMEI 设置，和其他设置（界面语言、默认主题、登录密码、TTL）使用左右两竖列显示，界面偏好面板内界面语言与默认主题上下两张子卡片排布；默认主题（浅色模式/暗夜模式）保存为设备级默认值，服务端在输出 HTML 时把 `data-bs-theme` 上的占位符替换为该值，无本地主题记录的浏览器（含登录页）首屏即按默认主题渲染；页面标题栏右侧切换按钮的选择只写入当前浏览器本地存储，不影响设备默认值；设备操作面板的当前 IMEI 明文显示，状态指令 `+CGSN` 返回的当前 IMEI 会回填到 IMEI 设置输入框，自动化面板单独一列显示，其余面板、参数表和表单按一列从上到下显示，按钮采用内容自适应宽度；亮模式下侧边栏、标题栏、内容区、表格和控件使用全局白色主题，暗夜模式下整体切换为更亮的深灰暗色主题；短信页收件箱按单行摘要显示发件人、时间和部分内容，点击摘要行通过全局弹窗覆盖整个后台界面显示完整短信内容，弹窗自适应视口高度，长短信正文在弹窗内独立滚动，弹窗和标题/信息/正文按顺序淡入显示；短信页停留在当前页面时使用固定时间轮询强制查询收件箱索引元信息，前端记录短信存储索引集合，索引没有变化时不拉取完整短信正文也不更新页面，WebSocket 响应不包含 `text` / `textLines` 大字段；发现索引变化后先缓存元信息并等待连续轮询确认索引稳定，确认新短信分片收齐后才拉取完整短信并一次性更新到页面，离开短信页后停止自动刷新；短信页收件箱底部刷新按钮后面紧跟删除按钮，按钮间隔 5px；控制台通过右侧内容显示区内嵌打开，不会离开单页外壳进入全屏独立页面，并且控制台高度跟随右侧内容区自动撑满可用高度，控制台内部页面隐藏可见滚动条，避免 iframe 内外出现双滚动条；控制台连接后直接进入 PTY shell（复用后台登录会话与 Origin 校验，无独立终端账号密码），控制台前端支持 ANSI SGR 颜色显示，包含基础 16 色、256 色和 truecolor 前景/背景色，并在 PTY shell 环境中设置 `TERM=xterm-256color`、`COLORTERM=truecolor`，控制台横幅不再显示旧的网页登录密码设置提示；页面侧边栏品牌区和浏览器标题会通过公开接口读取 `AT+CGMM` 获取到的模块型号并显示为当前品牌名称，品牌标识取模块型号前两位字符；后端成功获取一次型号后会在本次 `simpleadmin-httpd` 运行期间缓存，后续登录页、后台主页面、设备信息页和蜂窝网络页直接使用缓存型号，不再自动重复发送 `AT+CGMM`；设备信息页会把制造商、IMEI、固件、IMSI、ICCID、号码等低频信息拆成独立静态缓存，SIM/WWAN 在线状态仍按短缓存刷新；蜂窝网络页会把频段锁定查询、网络偏好/APN/小区锁配置和实时 `QCAINFO` 分开缓存，避免每次页面刷新都重复读取不变配置；短信页自动轮询只强制读取索引元信息，短信完整正文只有索引稳定且变化时才读取；设备信息页 Project Contributors 弹框为与全站一致的自建 `modal-overlay` 模态，由设备信息页工厂 `showContributors` 状态与 `openContributors()`/`closeContributors()` 控制，底部 Close 按钮关闭；登录页也会读取同一接口显示模块型号，未读取到型号时显示 `SimpleAdmin`。自动化页包含断网自愈看门狗、每日定时重启、短信转发和时间同步四个面板，其中看门狗、定时重启、短信转发各占一格，时间同步面板提供启用开关、同步间隔（分钟，1-1440）与单一 NTP 服务器地址（缺省阿里云 ntp.aliyun.com）输入、状态/上次同步/系统时间状态徽章行，以及“保存时间同步”与“手动同步一次”按钮，手动同步进行中按钮显示“同步中…”；系统监控页位于自动化与系统设置之间，展示效果类似 htop：顶部同一行显示 CPU 半圆仪表盘卡片、内存半圆仪表盘卡片和一个负载/运行时长/进程数信息卡片，下方“进程 Top 20”面板提供按 CPU/按内存排序切换、刷新按钮、更新时间和进程表（PID、用户、进程名、CPU%、内存%、内存占用），页面停留时每 3 秒自动刷新，离开页面停止刷新。 |
-| `login.html` | 页面登录入口，使用普通表单提交用户名和密码；登录页读取与主界面相同的本地主题状态，支持浅色模式和暗夜模式切换；登录成功后由后端写入 HttpOnly 会话 Cookie，再进入单页管理界面，不触发浏览器 Basic Auth 弹窗。 |
+| `index.html` | 登录成功后的单页管理界面入口（React SPA 外壳）：挂载点 `#root`，经 `modulepreload` 引用 `/assets/` 内容寻址分块（初始壳层 `main-*.js`、vendor/react-vendor/i18n/motion/query/echarts 等公共 chunk 与全局样式 `globals-*.css`）。左侧菜单切换 15 条 hash 路由页面（总览、系统监控、信号详情、蜂窝网络、小区锁定、网络详情、网络设置、防火墙、短信服务、AT 命令、控制台、网络诊断、自动化、系统设置、设备信息；按监控/网络/安全/通信/工具/系统六组归组），路由级懒加载按需分包。`<meta name="sa-version" content="__SA_VERSION__">` 携带构建注入的版本号（服务输出 HTML 时替换占位符，前端读取该 meta）；`data-bs-theme` 上的 `__SA_THEME__` 占位符由服务端替换为设备默认主题，head 内联防闪脚本结合 localStorage 决定首屏主题，无本地主题记录的浏览器首屏即按设备默认主题渲染。 |
+| `login.html` | 页面登录入口（Vite MPA 第二入口）：React 登录应用挂载 `#root`，与主界面共用 `/assets/` 公共分块；表单提交 `/api/login`，同样带 `__SA_THEME__` 防闪脚本并支持浅色/暗夜模式；登录成功后由后端写入 HttpOnly 会话 Cookie，再进入单页管理界面，不触发浏览器 Basic Auth 弹窗。 |
 
-### CSS、字体和静态资源
+### 资源、字体和运行时配置
 
 | 文件或目录 | 作用 |
 |---|---|
-| `css/tailwind.css` | 唯一样式表（约 53KB，minified），由 Tailwind CSS v4 样式源码 `development/simpleadmin/frontend/` 经 `make css` 编译生成并提交入库，设备端直接服务该产物；`index.html` 只加载 `css/tailwind.css?v=__SA_VERSION__` 与 `css/Poppins.css?v=__SA_VERSION__`。样式内容包含单页侧边栏布局、统一菜单、标题栏右侧主题切换按钮、移动端标题栏菜单按钮、页面标题栏、显示前直接置顶的页面切换处理、渐进显示动画、加载动效期间仅内容框内部临时隐藏滚动条、按钮/菜单/面板轻量过渡、短信收件箱刷新/删除按钮 5px 间隔横排、跟随页面宽度铺开的单列内容栈、内容面板、首页顶部 CPU/RAM 两张自适应居中半圆仪表盘卡、信号进度条大框和右侧合并指标大卡片共同组成同一行四部分状态区，信号行改为名称贴合文本并让进度条紧跟名称，名称与进度条之间的实际间距固定为 3px、紧凑参数行、首页网络信息精简/完整显示按钮、AT 命令页输出框/常用命令网格/命令历史列表、网络设置页当前状态徽章行、首页和设备页专用的系统信息式居中数据列信息表、自适应宽度按钮、蜂窝网络页和网络设置页横向动作按钮组、短信收件箱单行摘要、覆盖整个后台界面的全局详情弹窗、自适应高度详情弹窗和弹窗渐进淡入动效、网络工具四项横排布局、网络设置/AT 命令/系统设置页左右面板等高布局、系统设置页账号区域两列布局、TTL 状态和值同行布局，以及全局浅色模式/暗夜模式主题；主题作用于整个界面而不是局部内容区。设计令牌体系：圆角令牌 `--sa-radius-sm/…/--sa-radius-pill`（面板 16px、按钮/表单 12px、弹窗 20px、胶囊 999px）、阴影令牌 `--sa-shadow-sm/…/-lg`（暗夜附加卡片顶部高光 `--sa-panel-inset`）、间距令牌 `--sa-space-1…6`、字号令牌 `--sa-text-xs…2xl`、动效令牌 `--sa-ease/--sa-dur-fast/…/-slow`；令牌为浅色/暗夜双份运行时 CSS 变量，定义在源码 `frontend/input.css` 的 `@layer base`，并经 `@theme inline` 绑定为 Tailwind 主题，`bg-surface`、`text-muted`、`rounded-md` 等工具类可直接使用且自动跟随暗夜切换；整体风格为圆润卡片化，数值统一 `tabular-nums`，进度条/仪表盘加圆头端点和平滑过渡，按钮带 `:active` 缩放与 `:focus-visible` 焦点环，内容区最大宽度 1440px 居中，登录页主色/字体/圆角与主界面对齐。 |
-| `css/Poppins.css` | Poppins 字体样式声明，由 `index.html` 直接引入。 |
-| `fonts/*.woff2` | 本地字体文件。 |
+| `assets/*` | Vite 内容寻址构建产物（文件名带内容哈希的 JS/CSS 分块）：初始壳层、15 个路由页面 chunk、echarts/xterm/i18n/motion/query 等公共依赖 chunk 与全局样式 `globals-*.css`；提交入库，设备直接服务。`/assets/` 前缀在认证中间件里免会话（登录页依赖这些公共分块，见 `isPublicAuthPath`）。 |
+| `css/Poppins.css` | Poppins 字体样式声明，由入口 HTML 直接引入（公共资源，自 `frontend-react/public/` 原样复制）。 |
+| `fonts/*.woff2` | 本地字体文件（公共资源，自 `frontend-react/public/` 原样复制）。 |
 | `favicon.ico` | 浏览器标签页图标。 |
 | `config/get_language.json` | 前端语言默认配置，保存当前界面语言，支持 `zh-CN` 和 `en`。 |
-| `config/get_theme.json` | 默认主题配置，支持 `light` 和 `dark`，由 `/api/get_theme`、`/api/set_theme` 读写；服务 HTML 时注入 `data-bs-theme`，作为无本地主题记录浏览器的首屏主题。 |
+| `config/get_theme.json` | 默认主题配置，支持 `light` 和 `dark`，由 `/api/get_theme`、`/api/set_theme` 读写；服务 HTML 时注入 `data-bs-theme`（替换 `__SA_THEME__` 占位符），作为无本地主题记录浏览器的首屏主题。 |
 
-### 前端样式源码目录 `development/simpleadmin/frontend/`
+`www/config/` 是**运行时可写区**（后端在设备上修改界面语言/默认主题时写入），`sync-www.sh` 同步产物时整目录保留、绝不覆盖。
 
-Tailwind CSS v4 样式源码目录，编译产物为 `www/css/tailwind.css`；产物提交入库，设备端只服务该产物，运行时无构建。
+### 前端源码与构建管线 `development/simpleadmin/frontend-react/`
 
-| 文件 | 作用 |
+React 19 + TypeScript + Vite + Tailwind CSS v4 + shadcn/ui 前端源码。构建链：`frontend-react/` → `vite build` → `dist/` → `scripts/sync-www.sh` → `www/`；产物提交入库，设备端只服务产物，运行时无构建。
+
+| 文件/目录 | 作用 |
 |---|---|
-| `input.css` | 构建入口：`@import "tailwindcss"`；`@custom-variant dark` 对接既有 `data-bs-theme="dark"` 暗夜开关；`@theme inline` 把 `--sa-*` 运行时令牌映射为 Tailwind 主题；`@source` 扫描 `www/index.html`、`www/login.html` 与 `www/js`（覆盖 JS 动态模板中的类名）；`--sa-*` 设计令牌（浅色/暗夜双份）定义在 `@layer base`。 |
-| `src/components-base.css` | Bootstrap 移除后的等价控件/工具原语子集（按钮、表单、表格等），已令牌化。 |
-| `src/components-shell.css` / `src/components-controls.css` / `src/components-pages.css` | 原 `www/css/styles.css` 的外壳、控件、页面三段迁移，选择器与层叠顺序不变。 |
-| `package.json` / `package-lock.json` | 构建依赖（`devDependencies`：`tailwindcss`、`@tailwindcss/cli`），安装时优先 `npm ci` 按锁文件精确还原。 |
+| `index.html` / `login.html` | Vite MPA 双入口源文件；必须保留 `__SA_VERSION__`/`__SA_THEME__` 占位符约定。 |
+| `vite.config.ts` | 双入口 rollupOptions；manualChunks 拆出 react-vendor/vendor/query/i18n/motion/echarts/xterm 等公共 chunk，路由页面经动态 import 自动按页分包；dev server :5173，`/api` 与 `/console` 反向代理到 :18080（含 WebSocket）。 |
+| `src/app/` | `App.tsx`/`LoginApp.tsx`（双入口根组件）、`providers.tsx`（QueryClient/i18n/主题/toast 等全局 Provider）、`routes.tsx`（导航单一来源:15 路由 + 6 域分组，菜单/页面标题/浏览器标题/路由 id 全部取自该表）。 |
+| `src/lib/api/` | `gateway.ts`（`/api/ws` WebSocket 网关客户端：请求 id 匹配、断线退避重连、**每 15 分钟 `/api/get_uptime` 保活**、401 → sessionStorage 存当前 hash → 跳 `/login.html`）、`endpoints.ts`（全部页面 API 的类型化封装）、`auth.ts`（登录/注销）。 |
+| `src/lib/i18n/` | react-i18next 初始化；`locales/{zh-CN,en}/` 各 18 个命名空间 JSON（common/nav/login + 每个 feature 域一个，含新增 `diag`），`manifest.json` 注册命名空间。 |
+| `src/lib/theme/` | 亮暗主题读写（`data-bs-theme` + localStorage + 设备级 `/api/set_theme`）。 |
+| `src/components/` | `ui/`（shadcn/ui 基础组件）、`layout/`（侧栏/顶栏/页面骨架）、`common/`（空态、错误重试、危险区等跨页组件）、`charts/`（ECharts 按需封装）。 |
+| `src/features/` | 16 个功能域（15 路由 + login），域内约定见「前端功能域」一节。 |
+| `src/stores/` | zustand 全局状态：`ui.ts`（侧栏/界面状态）、`confirm.ts`（确认框）、`reboot.ts`（重启倒计时）。 |
+| `src/styles/` | `tokens.css`（浅色/暗夜双份设计令牌）+ `globals.css`（Tailwind v4 入口与全局样式）。 |
+| `e2e/` | Playwright 端到端测试（`make web-e2e`；webServer 自起 dev-mock mock 后端）。 |
+| `scripts/sync-www.sh` | dist → www 同步：清空 www 后全量复制，**`www/config/` 整目录保留**，缺失时创建并写入默认配置，同步后校验 `www/index.html` 存在；幂等。 |
+| `scripts/migrate-i18n.mjs` | 旧 `www/js/simpleadmin-lang.js` 字典 → 命名空间 JSON 的迁移脚本；源字典已随旧管线退役，脚本保留作键溯源。 |
+| `package.json` / `package-lock.json` | 依赖与脚本（dev/build/typecheck/lint/test 等）；安装时优先 `npm ci` 按锁文件精确还原。 |
 
 构建纪律：
 
-- 修改前端样式源码后必须执行 `make css` 并提交 `www/css/tailwind.css` 产物。
-- `make css-check` 重新编译到临时文件并与已提交产物 diff，校验源码与产物一致；CI 执行同一检查。
-- 前端不再加载 `bootstrap.min.css`（232KB）、`styles.css`（48KB）和 `bootstrap.bundle.min.js`（80KB），由约 53KB 的 `tailwind.css` 替代；前端静态资源体积约 980KB → 约 670KB（净减约 310KB）。
+- 修改前端源码后执行 `make web`（构建 + 同步 www）并提交 `www/` 产物；`make web-build` 只构建不同步。
+- 提交前必须通过 `make web-test`（typecheck + lint + vitest）与 `make web-size`（体积预算）。
+- 体积：www 由旧管线约 824KB 增至约 2.2MB（React + ECharts + xterm 分包、路由级懒加载）；`make web-size` 检查初始壳层/echarts chunk/xterm chunk/总量四道预算闸门，任一超标即失败。LAN 场景（本地加载、不走公网）的取舍已在设计文档记录。
 
-## 前端公共 JavaScript
+## 前端功能域 `src/features/`
 
-### 前端公共工具命名空间 `window.SimpleAdmin`（原 `simpleadmin-core.js`，已按模块拆分）
+旧 `www/js/*` 公共命名空间（`window.SimpleAdmin`）与页面工厂脚本已全部随 Vue 管线退役。React 前端每个功能域一个目录，域内约定一致：`page.tsx`（页面组件，**default export**，经 `routes.tsx` 懒加载按页分包）、`hooks.ts`（TanStack Query 查询/变更/轮询）、`lib.ts`（解析/校验/格式化纯函数，可独立单测）、`components/`（域内组件）、`*.test.ts(x)`（vitest 同目录测试）。数据统一经 `lib/api/endpoints.ts` → `/api/ws` WebSocket 网关。
 
-前端公共工具命名空间，挂载到 `window.SimpleAdmin`。原 1200+ 行单文件已按命名空间模块拆分，`index.html` 按依赖顺序加载（版本号 `?v=2.95`）：
-
-| 文件 | 模块 | 职责 |
-|---|---|---|
-| `js/simpleadmin-api.js` | `SimpleAdmin.Api` | `/api/ws` WebSocket 请求封装与全部页面 API 方法。单次请求 240 秒超时后关闭连接并在下次请求时自动重建（自愈；取 240 秒是因为小区扫描后端最长约 182 秒，前端超时必须大于后端等待上限，否则扫描临近完成时前端会先超时断开连接）；业务响应状态 401 时自动跳转登录页；WebSocket 握手失败时用 `/api/get_language` 探测会话状态，探测返回 401（会话过期）时跳转登录页，探测失败按网络故障处理。 |
-| `js/simpleadmin-brand.js` | `SimpleAdmin.Brand` | 品牌/模块型号名称展示。 |
-| `js/simpleadmin-text.js` | `SimpleAdmin.Text` | 文本与十六进制工具。 |
-| `js/simpleadmin-time.js` | `SimpleAdmin.Time` | 短信时间解析与格式化。 |
-| `js/simpleadmin-sms.js` | `SimpleAdmin.Sms` | 短信 UDH 拼接头等前端辅助。 |
-| `js/simpleadmin-lang.js` | `SimpleAdmin.Lang` | 中英双语字典与自动翻译（MutationObserver）。 |
-| `js/simpleadmin-ui.js` | `SimpleAdmin.UI` | 主题、提示、模态等 UI 工具。 |
-| `js/simpleadmin-mockat.js` | `SimpleAdmin.MockAT` | 浏览器 Console 注入 mock AT 数据（仅 `--mock`）。 |
-| `js/simpleadmin-logout.js` | `SimpleAdmin.Logout` | 注销跳转。 |
-| `js/simpleadmin-core.js` | — | 引导文件：命名空间导出与 `Brand.init()` 启动。 |
-
-以下为原 `SimpleAdmin` 各方法的说明（方法归属见上表）：
-
-| 对象/方法 | 功能 |
+| 功能域（路由） | 职责 |
 |---|---|
-| `SimpleAdmin.Api.text(url, options)` | 通过 `/api/ws` WebSocket 请求文本响应。 |
-| `SimpleAdmin.Api.json(url, options)` | 通过 `/api/ws` WebSocket 请求 JSON 响应。 |
-| `SimpleAdmin.Api.url(path, params)` | 根据路径和查询参数生成 URL。 |
-| `SimpleAdmin.Api.getDeviceInfo(params)` | 读取设备信息结构化 JSON；支持传入 `force` 强制刷新，只由设备信息页生命周期触发。 |
-| `SimpleAdmin.Api.getAT(atcmd, options)` | 兼容保留的 AT 缓存读取方法，仅供调试使用；AT 命令页手动发送已改用 `/api/at_data`，页面脚本不再调用。 |
-| `SimpleAdmin.Api.refreshAT(atcmd)` | 兼容保留的 AT 强制刷新方法，仅供调试使用。 |
-| `SimpleAdmin.Api.getATText(atcmd, options)` | 兼容保留的 AT 文本读取方法，仅供调试使用。 |
-| `SimpleAdmin.Api.atData(params)` | POST `/api/at_data`，AT 命令页手动 AT 与重置 AT&F 使用。 |
-| `SimpleAdmin.Api.networkConfigData(params)` | POST `/api/network_config_data`，网络设置页状态读取与网络配置动作使用。 |
-| `SimpleAdmin.Api.firewallData(params)` | POST `/api/firewall_data`，防火墙页状态（阻止/放行规则列表与所有链统计）读取与规则保存使用。 |
-| `SimpleAdmin.Api.systemData(params)` | POST `/api/system_data`，系统设置页状态（IMEI）、修改 IMEI、重启使用。 |
-| `SimpleAdmin.Api.getUptime()` | 获取系统运行时间。 |
-| `SimpleAdmin.Api.getPing()` | 获取网络连通性检测结果。 |
-| `SimpleAdmin.Api.getTTLStatus()` | 获取 TTL 状态。 |
-| `SimpleAdmin.Api.setTTL(ttlvalue)` | 设置 TTL 值。 |
-| `SimpleAdmin.Api.getLanguage()` | 读取当前界面语言设置。 |
-| `SimpleAdmin.Api.setLanguage(language)` | 保存界面语言设置。 |
-| `SimpleAdmin.Api.setPassword(currentPassword, newPassword, confirmPassword)` | 通过 POST 表单请求修改当前登录密码。 |
-| `SimpleAdmin.Logout.start()` | 调用 `/api/logout` 清除页面登录会话 Cookie，然后跳转到 `login.html`，退出过程不显示提示界面。 |
-| `SimpleAdmin.Text.lines(value)` | 把文本拆成去空行后的行数组。 |
-| `SimpleAdmin.Text.findStartsWith(lines, prefix)` | 在行数组中查找指定前缀的第一行。 |
-| `SimpleAdmin.Text.findAllStartsWith(lines, prefix)` | 查找指定前缀的所有行。 |
-| `SimpleAdmin.Text.splitCsv(value)` | 简单 CSV 拆分，兼容引号。 |
-| `SimpleAdmin.Text.hexToUtf16BE(hex)` | 把 UCS2/UTF-16BE 十六进制文本转为字符串。 |
-| `SimpleAdmin.Text.compactHex(value)` | 去除十六进制文本中的空白。 |
-| `SimpleAdmin.Time.parseSmsDate(value)` | 解析短信时间字符串；内部 `parseCustomDate` 先剥离 `±hh` 时区后缀，解析失败返回 `null`（不回退当前时间），`parseSmsDate` 在失败时返回无效日期。 |
-| `SimpleAdmin.Time.formatDateTime(date)` | 格式化日期时间。 |
-| `SimpleAdmin.Sms.parseConcatHeader(hex)` | 解析短信拼接 UDH 头。 |
-| `SimpleAdmin.Sms.decodeUcs2(hex)` | 解码 UCS2 短信内容。 |
-| `SimpleAdmin.Sms.encodeUcs2(text)` | 编码 UCS2 短信内容。 |
-| `SimpleAdmin.Lang.normalizeLanguage(language)` | 规范化语言值，只接受中文 `zh-CN` 和英文 `en`。 |
-| `SimpleAdmin.Lang.getCurrentLanguage()` | 返回当前前端正在使用的语言。 |
-| `SimpleAdmin.Lang.t(key)` | 根据当前语言翻译指定界面文本，支持 `当前：...`、短信发送失败等动态前缀。 |
-| `SimpleAdmin.Lang.apply(rootNode)` | 把当前语言应用到指定 DOM 范围内的静态文本、表单选项、输入框/文本域占位符和常用属性。 |
-| `SimpleAdmin.Lang.load()` | 从后端语言配置或静态配置读取语言，并应用到页面；公共脚本会在所有页面自动加载语言。 |
-| `SimpleAdmin.Lang.setLanguage(language, options)` | 切换语言，resolve 值统一为 `{ language, localOnly }`；传入保存选项时同时写入后端配置并立即刷新当前页面文本，服务器保存失败时 `localOnly` 为 `true`，语言仍在本地生效，由调用方提示「已本地生效，服务器保存失败」。 |
-| 语言 MutationObserver | 监听 Vue 动态渲染后的文本、下拉框选项、输入框/文本域占位符和提示信息变化，自动按当前语言重新翻译。 |
-| 原生提示翻译 | 对页面 `alert()` / `confirm()` 中的中文提示进行当前语言转换。 |
-| `SimpleAdmin.UI.setText(selectorOrElement, value)` | 设置元素文本。 |
-| `SimpleAdmin.UI.initDarkMode(buttonId)` | 初始化标题栏主题切换按钮、同步 `data-bs-theme`、读写本地主题状态；兼容旧的按钮 ID 参数。 |
+| `dashboard`（`#/dashboard`） | 总览：`/api/dashboard_data` 结构化数据（SIM/网络/信号/载波/流量/CPU/RAM），信号与流量趋势图（ECharts 实时推送）；停留页面时才自动刷新。 |
+| `sysmon`（`#/sysmon`） | 系统监控：`/api/system_monitor` CPU/内存/负载/进程 Top 20；**温度传感器面板**：经 `/api/at_data` `manual_at` 低频拉取 `AT+QTEMP`（17 路），`lib.ts` 解析 `+QTEMP` 行。 |
+| `signal`（`#/signal`） | 信号详情：`/api/signal_data` 四天线 RSRP、服务小区、载波聚合主/辅载波。 |
+| `network`（`#/network`） | 蜂窝网络：`/api/network_data` 频段锁定、锁频配置档、APN、IP 类型、NR5G 模式；TTL 设置亦在本页。 |
+| `celllock`（`#/celllock`） | 小区锁定：小区扫描（含邻区扫描模式）、手动 PCI/EARFCN 锁定、解锁。 |
+| `netdetail`（`#/netdetail`） | 网络详情：WAN/LAN 地址、各接口状态、局域网在线设备与租期。 |
+| `netconfig`（`#/netconfig`） | 网络设置：`/api/network_config_data` IP 透传、USB 网卡协议、DNS 代理（IPv4/IPv6、自定义上游 DNS）、LAN IP、DHCP 静态绑定（MAC–IP）。 |
+| `firewall`（`#/firewall`） | 防火墙（Tabs）：端口放行/阻止规则（`status`/`save`）、全部 iptables 链统计、**IPv6 链**（`status6`，ip6tables 只读展示）、**DNAT 端口转发**（`fwd_list`/`fwd_save`）、**DMZ**。 |
+| `sms`（`#/sms`） | 短信服务：收件箱（`list_meta` 索引轮询 + 稳定后拉全文）、发送（PDU）、删除、**短信存储可视化**（经 `manual_at` 拉取 `AT+CPMS?`/`AT+CSCA?` 组合命令——多命令行分号后不得再带 `AT` 前缀，否则真机语法错误致 AT 通道超时且 CPMS 滞留 SM；`+CSCA` 的 UCS2 十六进制应答由前端 `decodeMaybeUcs2` 解码，口径对齐后端 `decodeMaybeUCS2`——+ CMS 错误码释义）、**短信 Webhook 卡**（自旧自动化页迁入）。 |
+| `atcommands`（`#/atcommands`） | AT 命令：`/api/at_data` `manual_at` 任意 AT 透传、`reset_at`（`AT&F`，危险区二次确认）。 |
+| `console`（`#/console`） | 控制台：**xterm.js 原生终端**，路由首次挂载才建立 `/api/console/ws` 连接（懒连接），终端主题随亮暗切换联动；不再经 iframe 内嵌后端 `/console` 页面。 |
+| `diag`（`#/diag`） | 网络诊断（新增）：`/api/diag_data` `http_probe`（ICMP 被运营商屏蔽，连通性探测一律用 HTTP）与 `dns_query`（可指定上游 DNS 服务器）。 |
+| `automation`（`#/automation`） | 自动化：断网自愈看门狗、每日定时重启、时间同步（短信 Webhook 卡已迁至短信页）。 |
+| `settings`（`#/settings`） | 系统设置：设备操作（AT 重启/设备重启/关机）、IMEI、界面语言、默认主题、登录密码。 |
+| `deviceinfo`（`#/deviceinfo`） | 设备信息：`/api/device_info_data` 静态信息（制造商/固件/IMEI/IMSI/ICCID/号码）+ SIM/WWAN 在线状态。 |
+| `login`（`login.html`） | 登录页（MPA 独立入口）：`/api/login` 表单提交，读取公开端点 `/api/module_model` 显示模块型号。 |
 
-### `development/simpleadmin/www/js/vue-app.js`
-
-Vue 3 页面挂载工具。
-
-| 方法 | 功能 |
-|---|---|
-| `SimpleAdmin.Vue.mount(factory, selector)` | 根据页面工厂函数创建并挂载 Vue 应用；单页模式下会按选择器记录到 `SimpleAdmin.Vue.apps`。 |
-| `SimpleAdmin.Vue.apps` | 保存已挂载的页面 Vue 实例，例如 `#dashboardApp`、`#netConfigApp`、`#atCommandsApp`、`#settingsApp`。 |
-| `mountSimpleAdminVueApp(factory, selector)` | 兼容旧页面写法的全局挂载函数。 |
-
-### `development/simpleadmin/www/js/dark-mode.js`
-
-暗夜模式初始化脚本。页面加载后调用 `SimpleAdmin.UI.initDarkMode()`，并监听 `simpleadmin:vue-mounted`，确保各页面标题栏右侧主题切换按钮在 Vue 挂载后也能重新绑定点击事件。
-
-### `development/simpleadmin/www/js/simpleadmin-spa.js`
-
-单页前端外壳控制脚本。
-
-| 方法 | 功能 |
-|---|---|
-| `SimpleAdmin.Spa.showPage(page)` | 根据左侧菜单或 URL hash 显示指定内容区，并在首次显示时挂载对应 Vue 页面；入口幂等，请求的就是当前页面时直接返回（浏览器历史回退不会双触发）；未知 hash 纠正为 `#dashboard`；页面标题经当前语言翻译后写入；切换完成后重新应用当前语言、保持新页面直接显示在顶端、触发当前页标题/面板/表格行/短信摘要行渐进显示，并派发 `simpleadmin:page-changed` 事件，供页面脚本按可见状态启动或停止刷新。 |
-| `SimpleAdmin.Spa.mountPage(page)` | 懒加载挂载指定页面的 Vue 应用；控制台内容区首次打开时才给内嵌 iframe 设置 `/console` 地址，避免进入首页时提前建立控制台连接。 |
-| `SimpleAdmin.Spa.reloadConsole()` | 强制重载控制台内嵌 iframe（先清除再重新设置 `/console` 地址），用于重新建立控制台连接。 |
-| `disableBrowserScrollRestore()` / `beginPageSwitch()` / `finishPageSwitchAtTop()` / `resetScrollPosition()` / `collectRevealItems(section)` / `applyProgressiveReveal(page)` / `scheduleProgressiveReveal(page)` | 禁用浏览器滚动位置恢复，页面切换时先隐藏内容区，使用 `history.pushState` / `replaceState` 更新地址栏以避免浏览器 hash 滚动，并立即通过 `scrollTop = 0` 重置全部滚动容器，再直接显示新页面顶端；刷新和 pageshow 后也重置到顶端；收集当前内容区中需要渐进显示的标题、面板、数据行和短信摘要行，按 DOM 顺序设置延迟，并在页面切换后一次性启动全部元素的渐进显示，不再等待滚动进入可视区域；渐进显示期间给当前页加 `sa-reveal-running` 状态，只临时隐藏面板/表格响应容器/收件箱/页脚等内部滚动条，不隐藏页面全局右侧滚动条，动效结束后自动恢复正常 overflow。 |
-| Hash 路由 | 支持 `/#dashboard`、`/#signal`、`/#network`、`/#celllock`、`/#netdetail`、`/#netconfig`、`/#firewall`、`/#sms`、`/#atcommands`、`/#console`、`/#automation`、`/#sysmon`、`/#settings`、`/#deviceinfo`；当前 `www` 根目录只保留 `index.html` 和 `login.html`，不再依赖旧 HTML 跳转页。 |
-
-
-### `development/simpleadmin/www/js/band_map.js`
-
-模块型号与频段映射表。项目目标模块为移远 `RM520N-CN`（`TARGET_MODEL`）；默认频段集合 `DEFAULTS` 即该模块的硬件支持频段（LTE B1/3/5/8/34/38/39/40/41，NSA n41/78/79，SA n1/3/5/8/28/41/78/79，规格书口径），型号未识别或未读取到时按目标模块显示，不再回退到全频段大列表。
-
-| 方法 | 功能 |
-|---|---|
-| `band_map.TARGET_MODEL` | 目标模块型号常量（`RM520N-CN`）。 |
-| `SimpleAdmin.Bands.getBandsForModel(model, fallback)` | 根据模块型号返回 LTE、NSA、SA 支持频段；命中 `ENTRIES` 用该型号频段，未命中回退 `DEFAULTS`（目标模块频段）。 |
-
-### `development/simpleadmin/www/js/populate-checkbox.js`
-
-频段复选框生成和选中状态同步逻辑。
-
-| 函数 | 功能 |
-|---|---|
-| `populateCheckboxes(lte_band, nsa_nr5g_band, nr5g_band, locked_lte_bands, locked_nsa_bands, locked_sa_bands, cellLock)` | 根据模块支持频段和当前锁定频段，同时生成 LTE、NR5G-NSA、NR5G-SA 三个模式的复选框。 |
-| `addCheckboxListeners(cellLock)` | 给三个模式的频段复选框绑定变更事件，按 `data-band-mode` 同步对应模式的选中频段状态。 |
-
-
-## 前端页面脚本
-
-各页面脚本在普通模式下仍可通过 `mountSimpleAdminVueApp()` 挂载；在单页模式下会注册到 `SimpleAdmin.Pages`，由 `simpleadmin-spa.js` 在左侧菜单首次打开对应内容区时挂载。
-
-### `development/simpleadmin/www/js/pages/index.js`
-
-首页 Vue 数据与方法。
-
-| 方法 | 功能 |
-|---|---|
-| `startDashboardRefresh()` / `stopDashboardRefresh()` / `fetchNetworkInfo()` | 仅在停留首页时通过 `/api/dashboard_data` 获取后端已解析的首页结构化 JSON；离开首页后停止自动刷新；首页 JS 不再包含 QENG/QCAINFO/QMAP 等 AT 协议解析逻辑。在线时长由响应中的 `uptimeParts` 解析承担，连通性直接使用后端 `internetConnection` 字段；请求失败时只标记失败状态，不刷新「更新时间」；响应带 `pending` 时保持旧值等待下一轮。 |
-| `fetchHistory()` / `startHistoryRefresh()` / `stopHistoryRefresh()` | 停留首页时通过 `/api/history_data` 获取历史采样并每 60 秒刷新，渲染信号趋势 SVG 折线与最新下载/上传速率、时间范围；数据首次到达前显示骨架占位。 |
-| `historySignalPoints()` 等 `history*` 方法 | 将历史采样换算为 SVG 坐标与展示文案。 |
-| `_atCacheUpdatedHandler` | 监听后端 `at_cache_updated` 推送，防抖 800 毫秒后静默刷新首页数据，无需等待轮询间隔。 |
-| `applyDashboardData(data)` | 将后端返回的 SIM、网络、信号、载波、流量、连通状态、CPU/RAM 使用量等业务字段直接同步到首页 Vue 数据，并在前端保留速率差值计算；`pending` 为 `true` 时直接返回，保持旧值等待下一轮。 |
-| `formatActiveSimStatus()` | 将后端返回的 SIM 激活状态和卡槽编号组合成“已激活卡1”这类内容区展示文本，顶部状态卡不再单独显示 SIM。 |
-| `clampPercent(value)` / `gaugeDashOffset(value)` / `formatPercent(value)` | 规范 CPU/RAM 百分比并驱动首页半圆仪表盘显示。 |
-| `formatRamUsage()` | 将 RAM 已用量和总量组合成仪表盘副标题。 |
-| `toggleNetworkCompact()` | 控制首页网络信息面板标题后的“精简显示/完整显示”按钮，精简显示时整行隐藏 MCCMNC、CELL ID、eNB ID 和 TAC，并把状态保存到浏览器本地存储。 |
-| `parseUptimeParts(data)` | 从后台 uptime 文本中解析天、小时、分钟。 |
-| `formatUptimeParts(parts)` | 根据当前语言格式化在线时长，英文模式显示 `days/hours/minutes`。 |
-| `setUptimeParts(parts)` | 缓存已解析的在线时长，并在语言切换时重新格式化显示。 |
-| `fetchTTL()` | 获取 TTL 状态。 |
-| `setTTL()` | 设置 TTL 值。 |
-| `init()` | 页面初始化时启动信号名称间距同步、拉取首页状态并启动自动刷新。 |
-
-### `development/simpleadmin/www/js/pages/deviceinfo.js`
-
-设备信息页 Vue 数据与方法。
-
-| 方法 | 功能 |
-|---|---|
-| `fetchATCommand()` | 仅在停留设备信息页时通过 `/api/device_info_data` 读取设备信息；离开设备信息页后不再继续安排下一次刷新；请求不再默认强制刷新所有 AT，制造商、IMEI、固件、IMSI、ICCID、号码等低频字段走后端静态缓存，SIM/WWAN 状态按短缓存刷新；后台缓存尚未就绪或未解析到 IMEI 时会在设备信息页可见期间快速重试，平稳后按固定间隔刷新 SIM/WWAN 相关字段。 |
-| `startDeviceInfoRefresh()` / `stopDeviceInfoRefresh()` | 根据 SPA 当前页面是否为设备信息页启动或停止设备信息自动刷新。 |
-| `openContributors()` / `closeContributors()` | 打开或关闭 Project Contributors 弹框；弹框为与全站一致的自建 `modal-overlay` 模态，由工厂内 `showContributors` 状态驱动。 |
-| `init()` | 页面首次挂载时绑定 `simpleadmin:page-changed` 事件；只有设备信息页处于当前页面时才启动自动刷新，并避免重复初始化。 |
-
-### `development/simpleadmin/www/js/pages/network.js`
-
-蜂窝网络页 Vue 数据与方法（频段锁定、锁频配置档、APN 等）。
-
-| 方法 | 功能 |
-|---|---|
-| `getCurrentSettings()` | 通过 `action=settings` 读取当前 APN、PDP 类型、首选网络、NR5G 模式控制和已锁频段等设置；后端返回 `pending`（开机保护期未就绪）时不渲染默认值，按 3 秒间隔重试（最多 10 次）；切回本页时如此前状态未就绪自动重新拉取。 |
-| `saveChanges()` | 把 PDP 类型/APN、首选网络模式、NR5G 模式控制变更通过 `action=save_settings` 一并提交；没有任何更改时提示并中止，提交后重新初始化页面。空 APN 允许提交（即「仅改 PDP 类型」合法），由后端保留模块当前 APN。 |
-| `applyNetworkActionResult(result)` | 统一检查网络写操作返回；`ok === false` 或未收到响应（传输失败）均视为失败，弹出错误并中止后续成功倒计时/刷新，避免失败假装成功。 |
-| `lockSelectedBandsForMode(mode)` | 按 LTE、NR5G-NSA 或 NR5G-SA 对应模式提交当前列已勾选频段进行锁定。 |
-| `resetBandLocking()` | 发送全部 LTE/NSA/SA 可用频段恢复指令，并重新查询三种模式当前已锁定频段和网络状态。 |
-| `getSupportedBands(force, mode)` | 查询当前已锁定频段；`mode` 为 `ALL` 时一次查询 LTE、NR5G-NSA 和 NR5G-SA 并回填三列勾选状态；`pending` 重试重建勾选时不覆盖用户已手动改动的勾选。 |
-| `toggleBandCheckboxes(mode)` | 只切换指定模式频段复选框的全部选中/取消选中状态，并同步该模式准备锁定的频段列表。 |
-| `saveBandProfile()` / `applyBandProfile()` / `deleteBandProfile()` / `loadBandProfiles()` | 锁频配置档：把当前三模式频段勾选、首选网络与 NR 模式控制保存到浏览器 `localStorage`（键 `simpleadmin.bandProfiles`），可命名保存、选择应用（仅填充界面不自动提交）与删除。 |
-| `init()` | 蜂窝网络页初始化；直接应用硬编码型号 `RG520N-CN` 的固定频段集并渲染三模式可用频段，再并行读取当前网络设置和当前已锁定频段；切回本页时如此前设置或锁定频段未就绪则重新拉取。 |
-
-
-### `development/simpleadmin/www/js/pages/celllock.js`
-
-小区锁定页 Vue 数据与方法（小区扫描、手动锁定/解锁）。
-
-| 方法 | 功能 |
-|---|---|
-| `startCellScan()` | 通过 `/api/network_data` 的 `action=scan` 执行小区扫描，把解析后的 NR5G/LTE 小区结果渲染到结果表；扫描进行中提示最长约 3 分钟；扫描失败时提示「扫描失败，请重试」，并清空已选小区与旧结果行，避免残留误导；后端返回 `empty: true`（AT 读取成功但解析出零个小区）时显示「扫描完成，模块未返回任何小区（该固件扫描功能可能受限）」，而非误导性的「未扫描到小区」；扫描响应携带 `pending: true` 时显示「模块尚未就绪，请稍后重试」。扫描模式下拉支持「邻区扫描」（`Neighbour Scan`，排在「全面扫描」前，后端执行 `AT+QNWCFG="nr5g_meas_info";+QENG="neighbourcell"`），该模式在本机固件上可用（QSCAN 失效时的可用扫描来源，推荐），表格/选择/锁定逻辑与 Full Scan 相同。 |
-| `toggleCellSelection(pci, provider, type)` | 切换扫描结果小区的选中状态；Full Scan 模式下 NR5G 小区按单选、LTE 小区按多选（≤10）处理，选择项携带小区类型；Full Scan 双选 LTE+NR5G 时由锁定操作依次提交（先 NR5G 单小区锁定，成功后再 LTE 多小区锁定）。切换扫描模式时清空旧的选择与扫描结果，避免用过期小区发起锁定。 |
-| `getLteCellCount()` | 读取并规范化 LTE 手动锁定的小区数量；空值、非法值或小于 1 时返回 0，最大限制为 10。 |
-| `hasLteManualCellCount()` | 判断 LTE 手动锁定是否已经输入有效小区数量；未填写数量时不渲染任何 EARFCN/PCI 输入框。 |
-| `visibleLteCellIndexes()` | 根据 LTE 小区数量生成可见输入组序号，只渲染当前需要的 EARFCN/PCI 输入组。 |
-| `getLteManualValue(index, field)` / `setLteManualValue(index, field, value)` | 读写第 `index` 组 LTE EARFCN/PCI 输入值，兼容后端仍使用的 `earfcn1/pci1` 到 `earfcn10/pci10` 字段。 |
-| `normalizeLteCellCount()` | 输入小区数量时自动限制到 1-10，并清空数量范围之外的旧 EARFCN/PCI 值。 |
-| `onNetworkModeCellChange(event)` | 切换到 LTE 手动小区锁定时清空旧的小区数量和旧 EARFCN/PCI，避免上次输入残留。 |
-| `getVisibleLteManualPairs(count)` | 只读取当前可见数量范围内的 LTE EARFCN/PCI 输入对，要求每一组填写完整，且 EARFCN/PCI 必须为纯数字。 |
-| `cellLockEnableLTE()` / `cellLockDisableLTE()` | 设置或清除 LTE 手动小区锁定；设置时要求已填写小区数量且各组 EARFCN/PCI 填写完整、纯数字；锁定/解锁成功后复位手动锁定表单，避免误重复提交。 |
-| `cellLockEnableNR()` / `cellLockDisableNR()` | 设置或清除 NR 手动小区锁定；设置时要求 PCI、EARFCN、SCS 和频段全部填写且为纯数字；锁定/解锁成功后复位手动锁定表单。 |
-| `getCurrentSettings()` | 小区锁定页精简版设置读取：通过 `action=settings` 仅读取 `cellLockStatus`（小区锁定状态）；后端返回 `pending` 或 `error` 时按 3 秒间隔重试（最多 10 次），避免状态永久停在「未知」。 |
-| `init()` | 小区锁定页初始化；注册 `onPageReturn('celllock')`（切回本页时如此前锁定状态未就绪则重新拉取）并读取当前小区锁定状态。 |
-
-
-### `development/simpleadmin/www/js/pages/netconfig.js`
-
-网络设置页 Vue 数据与方法。状态读写均通过 `/api/network_config_data`；各写操作共用 `isLoading` 防止重复提交。
-
-| 方法 | 功能 |
-|---|---|
-| `fetchStatus(retry)` | 通过 `status` 动作读取 IP 透传、USB 协议、DNS 代理、DMZ 和 LAN IP 当前状态，用于状态概览徽章和各开关显示；请求带 `force=1` 绕过缓存；后端返回 `pending` 或识别出全默认值的不可信载荷时不渲染默认值并按指数退避自动重试（8 次，窗口覆盖 60s+ 开机保护期；此前已成功加载过时保留旧值），重试耗尽或请求失败时显示失败态，由 `retryStatus()` 提供重试入口；入口代际序号防止新旧请求/重试链竞态；状态未加载完成前页面各操作按钮禁用。 |
-| `ipPassThroughEnable()` / `ipPassThroughDisable()` | 启用或禁用 IP 透传，启用需先选择 ETH/USB 模式，成功后回读状态；禁用时先提示并立即进入重启倒计时，再发送后端请求，避免第一条 `MPDN_RULE` 导致网口/WebSocket 断开时页面来不及显示重启界面。 |
-| `onBoardDNSV4ProxyEnable()` / `onBoardDNSV4ProxyDisable()` / `onBoardDNSV6ProxyEnable()` / `onBoardDNSV6ProxyDisable()` | 开关 DNSv4/DNSv6 代理，统一经 `changeDNSProxy(family, enabled)` 提交，成功后回读状态。 |
-| `usbNetModeChanger()` | 修改 USB 网络协议模式（RMNET/ECM/MBIM/RNDIS），成功后立即回读最新状态，再弹出重启确认弹窗；重启生效前页面显示「待重启生效」提示，倒计时结束且状态回读成功后清除。 |
-| `setDMZEnable()` / `setDMZDisable()` | 启用或关闭 DMZ；启用前先用 `validIPv4()` 前端校验 IPv4 地址，非法时不发请求，成功后才更新开关状态。 |
-| `setLANIP()` | 设置 LAN IP 地址范围和网关；前端校验网关 IPv4 格式、起始/结束地址为 1-254 的整数且起始不大于结束、网关末段为 1-254，并按网关前三段补全起始/结束地址后提交；保存成功后 LAN IP 保存按钮切换为“成功”状态并保持 3 秒，再恢复为“保存”，并回读状态确认已保存值。 |
-| `validIPv4(ip)` | 前端 IPv4 格式校验（4 段、每段 0-255 纯数字）。 |
-| `resolveDmzMode(mode, ip)` | 按后端返回的 DMZ 模式和 IP 判定页面显示的启用/禁用状态。 |
-| `fetchTTL()` / `setTTL()` | 读取 TTL 状态，读取失败时显示失败态，由 `retryTTL()` 提供重试入口；设置 TTL 值（0-255，0 表示禁用），设置后重新读取状态。 |
-| `handleRebootNotice(data)` | 读取后端返回的重启通知字段，收到 `reboot` 或 `rebooting` 后启动前端倒计时。 |
-| `showRebootModal()` / `closeModal()` | 打开或关闭重启确认弹窗；USB 协议已修改但取消重启弹窗时标记「待重启生效」。 |
-| `startRebootCountdown(seconds)` | 显示重启倒计时，按目标时间戳的真实时间计算剩余秒数（后台标签页不漂移），倒计时结束后延迟重新拉取网络设置状态。 |
-| `rebootDevice()` | 调用 `/api/system_data` 的 `reboot` 动作重启模块并显示倒计时；应答为参数级错误（`ok:false` 且带 `error`）时取消倒计时并提示；发送重启命令后连接断开时继续保持倒计时。 |
-| `setPageMessage(text, type)` | 显示并自动清除页面提示；消息条按语义色显示（默认错误红、`success` 成功绿、`info` 进行中主色）。 |
-| `t(key)` | 调用公共语言模块翻译页面动态提示。 |
-| `init()` | 网络设置页初始化；读取当前网络配置状态和 TTL 状态；注册 `simpleadmin:ip_passthrough_result` 监听，后台禁用透传失败时取消重启倒计时并提示；切回本页时自动重新拉取状态与 TTL。 |
-
-### `development/simpleadmin/www/js/pages/firewall.js`
-
-防火墙页 Vue 数据与方法，管理 SimpleFirewall 端口阻止/放行。页面由三个面板组成：「防火墙状态」面板显示启用状态徽章（`jumpInstalled`）、管理规则数（`ruleCount`，放行规则按 1 条、阻止规则按 4 条计）和规则语义说明（放行规则对所有接口生效；阻止规则在 bridge0、eth0、tailscale0 接口上放行，其余接口的对应入站连接被阻止），加载失败时提供重试；「端口规则」面板列出当前规则（端口 + 阻止/放行类型 + 删除），添加表单由端口输入与动作下拉（阻止/放行）组成，输入校验 1-65535 且同端口不重复添加，有未应用更改时提示，「应用更改」把当前列表整体原子保存（页面同时提示应用后立即生效、配置已持久化、重启后自动恢复、同一端口不能同时阻止和放行），「清空」清除全部规则；「所有防火墙规则」面板带刷新按钮，逐链展示后端返回的设备全部 iptables 链（链名 + 默认策略 + 数据包/字节计数 + 每条规则的 #/数据包/字节/目标/协议/入接口/出接口/源地址/目的地址/详情）。状态读写均通过 `/api/firewall_data`；应用操作经 `applying` 防重。数据字段：`serverRules`/`rules`（服务端与待应用规则列表，每条为 `{port, action}`）、`newPort`/`newAction`（添加表单，动作默认阻止）、`chains`/`ruleCount`/`jumpInstalled`（链统计与状态）、`isLoading`/`applying`/`statusLoaded`/`loadFailed`（加载与应用状态）、`firewallMessage`（页面提示）。
-
-| 方法 | 功能 |
-|---|---|
-| `fetchStatus()` | 通过 `status` 动作读取当前规则列表（`rules`，每条 `{port, action}`）、启用状态（`jumpInstalled`）、管理规则数（`ruleCount`）和所有链统计（`chains`）；请求失败时标记失败态，由 `retryStatus()` 提供重试入口。 |
-| `retryStatus()` | 状态加载失败后重试读取。 |
-| `addRule()` | 按当前选中的动作把输入端口加入待应用列表；校验 1-65535 纯数字，且同端口不重复添加（不区分动作），非法或重复时提示且不发送请求。 |
-| `removeRule(index)` / `clearRules()` | 删除单条规则 / 清空列表（均为待应用状态，不直接生效）。 |
-| `hasChanges()` | 按端口数值排序比较当前列表与服务端列表，判断是否有未应用更改，控制「应用更改」按钮可用性。 |
-| `saveRules()` | 通过 `save` 动作把当前列表按动作拆为 `block_ports`/`accept_ports` 整体提交，后端应用规则并持久化后回读状态；失败时显示错误提示；经 `applying` 防重。 |
-| `formatBytes(n)` / `formatCount(n)` | 链统计人性化显示：字节数按 1024 进制换算为 B/KB/MB/GB，数据包数加千分位分隔。 |
-| `actionLabel(action)` | 把动作值翻译为「放行」/「阻止」显示文本。 |
-| `setPageMessage(text)` | 显示并自动清除页面提示。 |
-| `t(key)` | 调用公共语言模块翻译页面动态提示。 |
-| `init()` | 防火墙页初始化；拉取当前状态。 |
-
-### `development/simpleadmin/www/js/pages/atcommands.js`
-
-AT 命令页 Vue 数据与方法。手动 AT 通过 `/api/at_data` 发送。
-
-| 方法 | 功能 |
-|---|---|
-| `sendATCommand()` | 通过 `manual_at` 动作发送用户输入的 AT 命令，返回后以“> 命令”格式追加到输出框并写入命令历史；输入为空时不发送任何命令。 |
-| `runQuickCommand(cmd)` | 填入常用命令快捷按钮的预置 AT 命令并立即发送。 |
-| `appendOutput(command, response)` | 把本次命令和响应追加到输出框，超出 200 行时只保留最近内容，截断点推进到下一条以 `> ` 开头的命令记录边界，避免留下孤儿响应残留。 |
-| `copyOutput()` | 复制输出框内容到剪贴板，浏览器不支持时回退 `execCommand` 复制。 |
-| `clearResponses()` | 清空 AT 输出。 |
-| `loadHistory()` / `saveHistory()` / `pushHistory(command)` | 从浏览器 `localStorage`（键 `simpleadmin.atHistory`）读取、持久化和更新命令历史，去重后最多保留最近 50 条。 |
-| `historyPrev()` / `historyNext()` | ↑/↓ 键召回上一条/下一条历史命令，翻过最新一条时恢复召回前的输入草稿。 |
-| `openResetModal()` / `closeResetModal()` / `confirmResetAT()` | 重置 AT&F 需二次确认；确认后调用 `reset_at` 动作执行 `AT&F` 并等待后端结果，成功才清空输出并弹出重启确认弹窗，失败时显示失败提示且不弹重启确认；重置期间页面各按钮经 `isLoading` 禁用，防止重复触发。 |
-| `showRebootModal()` / `closeModal()` | 打开或关闭重启确认弹窗。 |
-| `startRebootCountdown(seconds)` | 显示重启倒计时，按目标时间戳的真实时间计算剩余秒数（后台标签页不漂移）。 |
-| `rebootDevice()` | 调用 `/api/system_data` 的 `reboot` 动作重启模块并显示倒计时；发送重启命令后连接断开时继续保持倒计时。 |
-| `setPageMessage(text, type)` | 显示并自动清除页面提示；消息条按语义色显示（默认错误红、`success` 成功绿、`info` 进行中主色）。 |
-| `t(key)` | 调用公共语言模块翻译页面动态提示。 |
-| `init()` | AT 命令页初始化；加载命令历史。 |
-
-### `development/simpleadmin/www/js/pages/settings.js`
-
-系统设置页 Vue 数据与方法。设置页只负责系统类设置（设备操作电源动作、IMEI、界面语言、默认主题、登录密码、TTL）；AT 终端和网络配置分别位于 AT 命令页（`atcommands.js`）和网络设置页（`netconfig.js`），自动化功能位于自动化页（`automation.js`）。默认主题保存为设备级默认值，供无本地主题记录的浏览器首屏使用。
-
-| 方法 | 功能 |
-|---|---|
-| `rebootDevice()` | AT命令重启：二次确认弹窗（标题/文案/确认按钮可经 `SimpleAdmin.Reboot.request` 覆盖）确认后调用 `/api/system_data` 的 `reboot` 动作（`AT+CFUN=1,1`）重启蜂窝模块并进入 40 秒倒计时，倒计时结束后重新初始化设置页数据；设备本身保持运行。 |
-| `rebootSystem()` / `startSystemReboot()` | 设备重启：红色确认弹窗二次确认后调用 `reboot_device` 动作（后端异步执行系统 `reboot` 命令），先启动 60 秒倒计时再发送命令（设备随即停机、WS 中断属常态），仅当后端明确返回失败（命令无法启动）时取消倒计时并提示，倒计时结束后重新初始化设置页数据。 |
-| `poweroffDevice()` / `startPoweroff()` | 关机：红色确认弹窗二次确认（明示关机后须手动通电）后调用 `poweroff_device` 动作（后端异步执行系统 `poweroff` 命令）；成功弹出“设备已关机”提示弹窗，后端明确失败时仅提示错误；请求发出后传输中断时延时 6 秒探测免会话登录页，设备仍可达判定命令未送达只提示重试，不可达才弹出已关机弹窗。 |
-| `openImeiModal()` | 校验新的 15 位数字 IMEI（且不能与当前 IMEI 相同），并打开 IMEI 修改确认弹窗。 |
-| `updateIMEI()` | 调用 `/api/system_data` 的 `set_imei` 动作写入新 IMEI，并立即进入重启倒计时；应答为确定性失败（`ok:false` 且带 `error`）时取消倒计时并提示；设置后连接断开时继续保持倒计时；已进入倒计时时模块先重启后应答返回失败属预期，不显示误导错误提示。 |
-| `fetchSystemStatus(retry)` | 通过 `/api/system_data` 的 `status` 动作（带 `force=1` 绕过缓存）读取当前 IMEI 并回填到 IMEI 设置输入框；后端返回 `pending` 时不渲染默认值并按指数退避自动重试（8 次，窗口覆盖 60s+ 开机保护期），重试耗尽或请求失败时显示失败态，由 `retrySystemStatus()` 提供重试入口；入口代际序号防止新旧请求/重试链竞态。 |
-| `fetchLanguageSetting()` | 读取当前界面语言设置并同步到设置页选项。 |
-| `saveLanguageSetting()` | 保存用户选择的中文或英文语言，并立即应用到界面。 |
-| `changeLoginPassword()` | 校验当前密码、新密码和确认密码，调用后端接口修改登录密码；修改成功后显示「退出并重新登录」按钮，点击经注销流程跳转登录页。 |
-| `fetchAutomationSettings()` / `saveAutomation()` | 读取并保存自动化设置：断网自愈看门狗（开关/连续失败次数/冷却分钟）、每日定时重启（开关/时刻）、新短信转发 Webhook（开关/URL），分别经 `/api/get_*` 与 `/api/set_*` 接口持久化；保存前前端先校验失败次数 1-60、冷却分钟 1-1440、时刻为 `HH:MM` 格式；保存经 `isSavingAutomation` 防重，配置加载完成前表单项与保存按钮禁用；保存结果按项列出失败明细，全部成功后提示已保存，保存完成后回读配置同步页面。 |
-| `setAutomationMessage(text)` / `setSettingsMessage(text, type)` | 显示并自动清除自动化区域或设置页提示；设置页消息条按语义色显示（默认错误红、`success` 成功绿、`info` 进行中主色）。 |
-| `t(key)` | 调用公共语言模块翻译设置页动态提示。 |
-| `init()` | 设置页初始化；读取界面语言、系统状态（IMEI）和自动化设置；监听 `simpleadmin:page-changed`，切回本页时自动重新拉取系统状态和自动化设置。 |
-
-### `development/simpleadmin/www/js/pages/sms.js`
-
-短信页 Vue 数据与方法。
-
-| 方法 | 功能 |
-|---|---|
-| `clearData()` | 清空短信列表、选择状态和当前短信详情弹窗状态。 |
-| `requestSMS(options)` | 请求后端已解析短信列表；支持 `force` 强制重新读取和 `silent` 静默更新；长短信由后端优先按 PDU UDH 的 `concatRef` 在全列表范围内合并，即使分片索引中间夹着旧短信也会按 `concatSeq` 拼成一条；没有 UDH 拼接信息时才兼容按同发送方、5 秒内、连续存储索引分组，并按索引升序拼接后返回；短信正文包含 LF、CR、VT、FF、Unicode 行分隔符或文本形式 `\n` / `\r\n` 时，后端统一规范为换行并返回 `textLines`，收件箱先按单行摘要显示发件人、时间和部分内容，点击摘要行后用安全文本节点和 `<br>` 弹出完整内容；文本模式正文保留 `+` 开头的行（只跳过已知协议行），时间戳被逗号拆断时自动拼回。 |
-| `applySMSData(data, options)` / `pushSMSMessage(sender, date, text, indices)` | 将后端完整短信列表写入前端收件箱；自动刷新时只有确认短信索引变化且稳定后才调用，并尽量保留当前详情弹窗和勾选状态。 |
-| `parseCustomDate(dateStr)` | 解析后端返回的短信时间，先剥离 `±hh` 时区后缀；解析失败返回 `null`（不回退当前时间），收件箱时间显示占位 `-`。 |
-| `formatDate(date)` | 格式化短信时间。 |
-| `getMessagePreview(message)` | 把短信多行正文压缩成单行摘要内容，用于收件箱列表。 |
-| `openMessageDetail(index)` / `closeMessageDetail()` | 打开或关闭短信详情弹窗，弹窗显示当前短信发件人、时间和完整内容。 |
-| `startSMSAutoRefresh()` / `stopSMSAutoRefresh()` / `autoRefreshSMS()` / `handlePolledSMSMeta()` / `fetchStableSMSList()` | 仅短信页处于当前页面时按固定时间轮询 `/api/sms_data` 的 `list_meta`，每次用 `force=1` 强制读取短信索引元信息；前端记录当前短信索引集合，索引没有变化时不请求完整短信正文、不更新页面，WebSocket 返回不包含 `text` / `textLines`；发现索引变化后先缓存元信息，等待连续轮询确认索引稳定和分片收齐后，再请求完整列表并一次性更新收件箱；离开短信页后停止轮询并清空待确认结果。 |
-| `deleteSelectedSMS()` | 删除选中的短信，包含拼接短信的所有分段索引；前端只提交索引，后端生成删除指令；删除失败时通知失败原因。 |
-| `deleteAllSMS()` | 删除全部短信；删除失败时通知失败原因。 |
-| `sendSMS()` | 只提交收件人号码和短信正文，经 `isSending` 防止重复发送，由 Go 后端通过 `AT+CIMI` 读取 IMSI、取前三位 MCC 映射国家/地区呼叫码，给非 `+` 开头号码自动添加 `+呼叫码`，再切换到 `AT+CMGF=0` PDU 模式完成 UCS2 PDU 编码、分段发送和发送结果判断。 |
-| `showNotification(message, type)` | 显示短信页提示。 |
-| `toggleAll(event)` | 全选或取消全选短信。 |
-| `init()` | 页面初始化，强制读取短信并在短信页可见时启动自动刷新。 |
-
-### `development/simpleadmin/www/js/pages/automation.js`
-
-自动化页 Vue 数据与方法，包含断网自愈看门狗、每日定时重启、时间同步与短信转发四个面板。
-
-| 方法 | 功能 |
-|---|---|
-| `fetchWatchdog()` / `retryWatchdog()` / `saveWatchdog()` | 读取与保存看门狗配置（开关、连续失败次数 1-60、冷却分钟 1-1440、检测间隔 1-30 分钟、探测目标、自愈动作策略）；保存前逐项校验，保存后回读配置同步页面。 |
-| `lastActionText()` | 组合上次自愈时间与动作类型（无线电重注册/重启模块）的展示文本，从未执行时显示“从未”。 |
-| `fetchScheduler()` / `retryScheduler()` / `saveScheduler()` | 读取与保存每日定时重启配置（开关、`HH:MM` 时刻），保存前校验时刻格式。 |
-| `fetchTimeSync()` / `retryTimeSync()` / `saveTimeSync()` | 读取与保存时间同步配置（开关、同步间隔 1-1440 分钟、单一 NTP 服务器地址，缺省阿里云 `ntp.aliyun.com`）；保存后回读并显示轮询器状态、上次同步时间/偏差与当前系统时间。 |
-| `syncTimeNow()` | 手动同步一次：调用 `/api/timesync_now` 立即从配置的 NTP 源查询并校正系统时间，按结果显示成功（含偏差毫秒数）或失败通知，完成后回读状态；同步进行中按钮禁用并显示“同步中…”。 |
-| `lastTimeSyncText()` | 组合上次同步时间与结果（成功显示偏差毫秒、失败显示“失败”）的展示文本，从未同步时显示“从未”。 |
-| `fetchWebhookSetting()` / `retryWebhook()` / `saveWebhook()` | 读取与保存短信转发 Webhook 配置（开关、URL）。 |
-| `init()` | 页面初始化，拉取四类配置并在页面切回时重新拉取。 |
-
-### `development/simpleadmin/www/js/pages/sysmon.js`
-
-系统监控页 Vue 数据与方法，展示效果类似 htop：CPU/内存占用卡片加进程 Top 20 表格。
-
-| 方法 | 功能 |
-|---|---|
-| `fetchMonitor()` | 通过 `/api/system_monitor?sort=cpu|mem` 获取 CPU/内存占用、负载、运行时长、进程总数与进程 Top 20 列表并更新页面；入口按页面可见性拦截——系统监控页未显示时任何路径都不发起请求，避免后台无谓读取设备 `/proc` 增加压力；带在途请求守卫，失败时标记失败态并提供重试。 |
-| `retryMonitor()` | 清除失败标记并重新拉取。 |
-| `startPolling()` / `stopPolling()` | 停留系统监控页时每 3 秒自动刷新（经 `SimpleAdmin.Poll` 创建，后台标签页自动暂停）；切换到其他页面时由页面切换事件停止轮询，切回时恢复并立即刷新；轮询器每次心跳经 `fetchMonitor` 的页面可见性守卫二次拦截。 |
-| `clampPercent(value)` / `gaugeDashOffset(value)` | 规范百分比并驱动 CPU/内存半圆仪表盘显示。 |
-| `formatRamUsage()` | 将内存已用量和总量组合成仪表盘副标题。 |
-| `formatCpu(value)` / `formatNum(value)` | 进程表 CPU 百分比（保留一位小数，多核可超 100%）与内存百分比格式化。 |
-| `init()` | 页面初始化，绑定页面切换事件以启停轮询，并立即拉取一次数据。 |
+公共层：`src/components/{ui,layout,common,charts}`（shadcn/ui 基础组件、侧栏/顶栏骨架、空态/错误重试/危险区、ECharts 按需封装）；`src/stores/{ui,confirm,reboot}.ts`（zustand：界面状态、确认框、重启倒计时）；`src/lib/{api,i18n,theme,utils}`（WS 网关与端点封装、react-i18next、主题、通用工具）。交互约定：操作反馈用 toast（sonner）、危险操作走确认框、失败态必须可见并可重试、重启类流程失败必须取消倒计时。构建管线与目录说明见「前端源码与构建管线」一节，开发约定见 DEVELOPMENT.md §4。
 
 ## Go 后端源码 `go-build/simpleadmin-go/`
 
@@ -551,7 +270,7 @@ Go 模块声明文件，模块名为 `simpleadmin-go`。
 | `native_timesync.go` / `native_timesync_stub.go` | Linux `settimeofday` 修改系统时间实现与非 Linux 平台桩。 |
 | `system_monitor.go` | 系统监控页 `/api/system_monitor`：CPU/内存占用、负载、进程 Top 20（按 CPU 或内存排序）。 |
 | `sms_webhook.go` | 新短信到达时向配置的 Webhook 地址推送通知；含 30 秒后台轮询器（按配置启停，关闭即停），无人打开网页时也能触发转发。 |
-| `version.go` | 构建注入版本号与 HTML `?v=__SA_VERSION__` 占位符替换。 |
+| `version.go` | 构建注入版本号与 HTML 占位符替换：`__SA_VERSION__`（新前端经 `<meta name="sa-version">` 读取）与 `__SA_THEME__`（替换为设备保存的默认主题，首屏防闪）。 |
 | `console_page.go` | Web 控制台内嵌终端页面 HTML/JS 常量（仅 Linux）。 |
 | `mock_at_responses.go` | mock 模式 AT 响应常量与生成函数（原型：目标模块移远 RM520N-CN）。 |
 | `http_util.go` | `writeText`/`writeJSON` 等 HTTP 输出工具。 |
@@ -578,7 +297,7 @@ Go 模块声明文件，模块名为 `simpleadmin-go`。
 | `handleAPINotFound()` | 返回未知 API 错误。 |
 | `handleLegacyCGINotFound()` | 返回未知 CGI 兼容接口错误。 |
 | `sessionAuth()` | 为页面、静态文件、WebSocket 和业务 API 加页面登录会话校验；未登录访问页面时重定向到 `login.html`，未登录访问 API 时返回 JSON 401，不设置 `WWW-Authenticate`，避免浏览器弹出 Basic Auth 登录框。 |
-| `isPublicAuthPath()` | 判断登录页、登录/注销 API 和公开模块型号接口 `/api/module_model` 是否属于免会话访问路径。 |
+| `isPublicAuthPath()` | 判断免会话访问路径：登录页 `login.html`、注销页、登录/注销 API、公开模块型号接口 `/api/module_model`、`/favicon.ico`（精确匹配），以及静态资源前缀 `/css/`、`/fonts/`、**`/assets/`**（Vite 内容寻址构建产物，登录页与主应用共用、不含会话数据；未认证时若被 302 成登录页 HTML，登录页会样式错乱甚至脚本失效）。`index.html` 等 HTML 入口仍受会话保护。 |
 | `handleLoginPage()` | 输出页面登录界面；如果已有有效会话则直接进入单页管理界面。 |
 | `handleLogin()` | 校验用户名和密码，成功后创建随机会话令牌并写入 HttpOnly Cookie。 |
 | `handleLogout()` | 清除当前会话 Cookie；POST 请求返回 JSON，GET 或 HTML 请求重定向到 `login.html`。 |
@@ -674,6 +393,7 @@ Go 模块声明文件，模块名为 `simpleadmin-go`。
 | `setMockATPayload()` | 保存 Windows 控制台或浏览器开发者控制台输入的 AT 测试数据并让 AT 缓存失效。 |
 | `currentMockDashboardParseJSON()` | 将当前 mock 首页 AT 按 `/api/dashboard_data` 逻辑解析成 JSON，供 Windows 控制台 `parse` 命令查看。 |
 | `mockSMSList()` | 本地测试模式短信列表；含一条 10001 中文 UCS2 短信和一条英文短信，用于验证解析与合并逻辑。 |
+| `mockSMSStorageResponse()` | mock `AT+CPMS` 设置/读取与 `AT+CSCA?` 组合应答（短信页存储可视化条数据源）：按分号拆分逐段应答，设置形态回 6 字段、读取形态回三个带名三元组，数据与 `mockSMSList` 一致（ME 2/255、SM 0/40）；`+CSCA` 按真实固件在 `CSCS="UCS2"` 下的行为返回 UCS2 十六进制，覆盖前端 `decodeMaybeUcs2` 解码路径；列表/删除/发送组合（CMGL/CMGD/CMGS/CMGR）自带 `+CPMS` 前缀，由分发条件排除不抢占。 |
 | `mockSMSSendResponse()` | 本地测试模式短信发送响应。 |
 | `mockUptimeText()` | 本地测试模式运行时间。 |
 | `writeText()` | 输出纯文本 HTTP 响应。 |
@@ -705,7 +425,8 @@ Go 模块声明文件，模块名为 `simpleadmin-go`。
 | `page_network.go` | 蜂窝网络页：频段/模式设置、扫网、锁小区、`parseNetworkSettingsAT`/`parseCellScanAT`。 |
 | `page_at_data.go` | AT 命令页：`/api/at_data`（`manual_at` 任意 AT 透传、`reset_at` 执行 `AT&F`）。 |
 | `page_network_config.go` | 网络设置页：`/api/network_config_data` 状态与 IP 透传、DNS 代理、USB 协议、DMZ、LANIP 动作、`parseNetworkConfigStatusAT`。 |
-| `page_firewall.go` | 防火墙页：`/api/firewall_data`（`status`/`save`）、规则模型 `firewallRule{Port,Action}`、阻止/放行规则解析校验 `validateFirewallRules`（1-65535、同端口同动作去重、同端口冲突检测、上限 64）、配置文件读写（新格式每行 `<action> <port>`，兼容旧格式纯端口行）、`parseIPTablesChainDump` 解析 `iptables -vnL -x --line-numbers` 全部链统计（链头 policy/references 双形态、K/M/G 计数、每链规则上限 300 条）与 `mockChainsForRules` mock 合成链。 |
+| `page_firewall.go` | 防火墙页：`/api/firewall_data`（`status`/`save`、`status6`、`fwd_list`/`fwd_save`）、规则模型 `firewallRule{Port,Action}`、阻止/放行规则解析校验 `validateFirewallRules`（1-65535、同端口同动作去重、同端口冲突检测、上限 64）、配置文件读写（新格式每行 `<action> <port>`，兼容旧格式纯端口行）、`parseIPTablesChainDump` 解析 `iptables/ip6tables -vnL -x --line-numbers` 全部链统计（链头 policy/references 双形态、K/M/G 计数、每链规则上限 300 条）与 `mockChainsForRules` mock 合成链；命令序列生成 `firewallIPTablesCommands`/`firewallFwdIPTablesCommands` 与事务式应用/回滚（执行器经 `runtimeFirewallCommandRunner` 注入，平台无关可单测）；DNAT 端口转发规则模型 `firewallFwdRule{ExtPort,Proto,IntIP,IntPort,Enabled}`（上限 32 条）、`firewall_fwd.conf` 持久化与开机恢复 `applySavedFirewallFwdAtStartup`。 |
+| `page_diag.go` | 网络诊断页：`/api/diag_data`（`http_probe` HTTP 探测、`dns_query` DNS 解析）；运营商屏蔽 ICMP，连通性探测一律用 HTTP；探测客户端 `diagHTTPClient` 与指定服务器的拨号函数 `diagResolverDialer` 均为 var 注入点，便于单测。 |
 | `page_system.go` | 系统设置页：`/api/system_data` 状态（IMEI）、修改 IMEI、AT 重启（`reboot`）、设备整机重启（`reboot_device`，异步执行系统 `reboot`）与关机（`poweroff_device`，异步执行系统 `poweroff`，仅命令无法启动时返回失败）、`parseSystemStatusAT`。 |
 | `page_sms.go` | 短信页：列表解析（PDU/UDH 拼接、合并）、发送业务、删除。 |
 | `at_parse_util.go` | 共享解析工具：`atLines`/`csvFields`/`decodeMaybeUCS2`/`stringValue` 等；`atLines` 统一过滤后台未就绪提示与 AT 运行器错误文本（候选设备失败/超时/串口错误等），不再混入厂商、型号等页面数据。 |
@@ -733,9 +454,10 @@ Go 模块声明文件，模块名为 `simpleadmin-go`。
 | `parseSystemStatusAT(raw)` | 解析系统设置页状态 AT 返回（`+CGSN` 当前 IMEI）。 |
 | `handleATData()` | AT 命令页接口：`manual_at` 透传 `command` 参数的任意 AT（为空时默认 `ATI`），`reset_at` 执行 `AT&F`，其余 action 返回 400。 |
 | `handleNetworkConfigData()` | 网络设置页接口：`status`（IP 透传、USB 协议、DNS 代理、DMZ、LANIP 状态，开机保护期未就绪时带 `pending` 字段）、`ip_passthrough`、`dns_proxy`、`usbnet`、`dmz`、`lanip`；非法参数（未知模式、非法协议族、某段超过 255 的 IP 等）一律返回 400 和对应错误文案，其中 `dmz`/`lanip` 的 IP 参数经 `cleanIP()` 逐段校验（四段格式且每段 ≤255，与前端 `validIPv4()` 对齐）；禁用 IP 透传时先返回重启通知，再后台延迟分开发送 `MPDN_RULE`、`QMAPWAC`、`CFUN`，避免第一条命令重启网口导致前端收不到通知；后台执行完成后广播 `ip_passthrough_result` 事件（携带整体成功/失败），失败时前端取消重启倒计时并提示。 |
-| `handleFirewallData()` | 防火墙页接口：`status`（读取规则配置文件并返回 `rules`（每条 `{port, action}`）、`ruleCount`（放行规则按 1 条、阻止规则按 4 条计）、`jumpInstalled`（INPUT 是否挂载指向 `SADMIN_FW` 的跳转，真实模式从链统计判断）与 `chains`（设备全部 iptables 链统计，非 mock 模式经 `firewallDumpChains()` 解析 `iptables -vnL -x --line-numbers` 输出））、`save`（参数 `block_ports`/`accept_ports`，均逗号分隔，两者均空即清空；端口校验 1-65535、去重、上限 64，同一端口同时出现在两种动作中返回 400 端口冲突；真实模式先应用 iptables 规则（放行规则整体在阻止规则之前）再原子写入配置文件，保存即时生效）；非法端口、超过上限、端口冲突或未知 action 返回 400；mock 模式不执行真实 iptables，合成与真实结构一致的链统计。 |
+| `handleFirewallData()` | 防火墙页接口：`status`（读取规则配置文件并返回 `rules`（每条 `{port, action}`）、`ruleCount`（放行规则按 1 条、阻止规则按 4 条计）、`jumpInstalled`（INPUT 是否挂载指向 `SADMIN_FW` 的跳转，真实模式从链统计判断）与 `chains`（设备全部 iptables 链统计，非 mock 模式经 `firewallDumpChains()` 解析 `iptables -vnL -x --line-numbers` 输出））、`save`（参数 `block_ports`/`accept_ports`，均逗号分隔，两者均空即清空；端口校验 1-65535、去重、上限 64，同一端口同时出现在两种动作中返回 400 端口冲突；真实模式先读出当前落盘旧规则，再事务式应用 iptables 规则（放行规则整体在阻止规则之前，中途失败按旧规则重放恢复链），应用成功才原子写入配置文件，保存即时生效）、**`status6`**（执行 `ip6tables -vnL -x --line-numbers` 只读展示 IPv6 全部链统计，经注入点执行，失败如实上报 200 + `ok:false`，绝不把查询失败伪装成空结果）、**`fwd_list`**（读取 `firewall_fwd.conf` 返回 `forwarded` 规则列表；真实模式另经 nat 表链统计判断 `SADMIN_FWD` 链是否存在及 PREROUTING 跳转是否已挂载，返回 `jumpInstalled`）、**`fwd_save`**（DNAT 端口转发保存：参数 `rules` 为 JSON 数组，每条 `{extPort,intIP,intPort,proto,enabled}`，校验端口 1-65535、协议 tcp/udp、内网 IPv4 合法、去重、上限 32 条，非法即 400；真实模式事务式重建 nat 表 `SADMIN_FWD` 链（缺失则建链并挂 nat PREROUTING，flush 后只为 `enabled` 规则逐条重建 DNAT，中途失败按旧规则回滚），应用成功才原子持久化 `firewall_fwd.conf`；mock 模式不触内核）；非法端口、超过上限、端口冲突或未知 action 返回 400；mock 模式不执行真实 iptables，合成与真实结构一致的链统计。 |
 | `handleSystemData()` | 系统设置页接口：`status`（`+CGSN` 当前 IMEI，开机保护期未就绪时带 `pending` 字段）、`set_imei`（校验 15 位后写入新 IMEI 并重启）、`reboot`。 |
 | `handleSMSData()` | 短信列表、短信索引元信息、删除、发送前 SIM 状态检查等接口；自动轮询使用 `list_meta` 只返回索引/时间/分片元信息，不返回短信正文。 |
+| `handleDiagData()` | 网络诊断页接口：`http_probe`（空 action 时默认；参数 `target` 接受 http(s):// URL 或 `host[:port]`（自动补 `http://`），其余 scheme 返回 400；GET 探测 10 秒超时、最多跟随 3 次重定向（超限返回最后一个 3xx）、响应体读取 ≤64KB 后丢弃；成功返回 `{ok:true,target,statusCode,latencyMs}`，探测不通返回 200 + `{ok:false,target,error,latencyMs}`）、`dns_query`（参数 `domain` 必填、`server` 可选；域名格式校验失败或 server 非法返回 400；缺省 server 用系统解析器，指定 server 时经 UDP 拨号（缺省端口 53）单服务器解析，10 秒超时；成功返回 `{ok:true,domain,server,addresses,latencyMs}`，解析失败返回 200 + `ok:false` + `error`）。运营商屏蔽 ICMP，连通性判断一律用 HTTP 探测而非 ping；运行时失败绝不伪装成空结果。 |
 
 ### `go-build/simpleadmin-go/cmd/simpleadmin-httpd/sms_number.go`
 
@@ -761,18 +483,18 @@ PDU 模式短信编解码逻辑。
 
 ### `go-build/simpleadmin-go/cmd/simpleadmin-httpd/at_cache.go`
 
-AT 后台发送与缓存管理。页面通过缓存接口读取数据；缓存缺失、过期、强制刷新或设置类命令会进入后台队列，由后台 worker 串行发送 AT，并把返回写入缓存。系统刚开机时会按 `/proc/uptime` 做 AT 启动保护：开机 35 秒内多数读取类 AT 不阻塞页面等待，只返回后台处理中，避免模块 AT 口未就绪时多条长超时命令串行拖慢后台；`AT+CGMM` 属于静态型号查询，允许绕过开机保护立即执行并由后端短暂重试；成功获取一次型号后写入 `simpleadmin-httpd` 运行期缓存，后续页面刷新、页面切换、登录页和后台主页面品牌显示都直接复用缓存，不再自动加入周期刷新或重复发送该指令。设备信息页把静态信息、SIM/WWAN 实时状态和 LANIP 拆成三组缓存；蜂窝网络页把锁定频段、网络偏好/APN/小区锁配置和实时 `QCAINFO` 拆开缓存；网络设置页 QMAP/QCFG 配置和 LANIP 使用配置缓存；短信列表不会加入后台周期刷新，只由短信页自身固定轮询触发，避免离开短信页后仍持续 `CMGL`。蜂窝网络页频段读取支持按模式或一次性查询 LTE/NSA/SA 当前已锁定频段；页面在获取型号并渲染当前可用频段后会立即强制发送查询，普通刷新仍支持 `wait=0` 非阻塞模式，首次查询未就绪时先返回 pending，前端后台重试，不再影响当前网络状态显示。执行 `AT+CFUN=1,1` 等模块重启动作后会重新套用同一段保护期：重启后读取类命令在模块 AT 口恢复前返回后台处理中，缓存补刷延迟到保护期结束后进行。只读命令刷新成功后通过 WebSocket 异步广播 `at_cache_updated` 事件（写帧带超时），页面据此即时静默刷新。缓存条目记录最近请求时间：周期刷新只覆盖页面公共命令或最近 10 分钟内请求过的命令，非页面条目超过 15 分钟无请求时从缓存驱逐，手动一次性 AT 命令不会成为永久后台刷新任务；命令执行失败不刷新缓存时效，下次读取会重新执行；开机保护期内 worker 优先执行已就绪的命令，动作命令（重启/自愈）不会被等待中的读命令卡队。首页 `dashboard_data`、蜂窝网络页 `network_data`（settings）、网络设置页、系统设置页状态接口在开机保护期未就绪时均返回 `pending` 字段，前端自动重试或保持旧值，避免显示全默认值误导用户。
+AT 后台发送与缓存管理。页面通过缓存接口读取数据；缓存缺失、过期、强制刷新或设置类命令会进入后台队列，由后台 worker 串行发送 AT，并把返回写入缓存。系统刚开机时会按 `/proc/uptime` 做 AT 启动保护：开机 35 秒内多数读取类 AT 不阻塞页面等待，只返回后台处理中，避免模块 AT 口未就绪时多条长超时命令串行拖慢后台；`AT+CGMM` 属于静态型号查询，允许绕过开机保护立即执行并由后端短暂重试；成功获取一次型号后写入 `simpleadmin-httpd` 运行期缓存，后续页面刷新、页面切换、登录页和后台主页面品牌显示都直接复用缓存，不再自动加入周期刷新或重复发送该指令。设备信息页把静态信息、SIM/WWAN 实时状态和 LANIP 拆成三组缓存；蜂窝网络页把锁定频段、网络偏好/APN/小区锁配置和实时 `QCAINFO` 拆开缓存；网络设置页 QMAP/QCFG 配置和 LANIP 使用配置缓存；短信列表不会加入后台周期刷新，只由短信页自身固定轮询触发，避免离开短信页后仍持续 `CMGL`。蜂窝网络页频段读取支持按模式或一次性查询 LTE/NSA/SA 当前已锁定频段；页面在获取型号并渲染当前可用频段后会立即强制发送查询，普通刷新仍支持 `wait=0` 非阻塞模式，首次查询未就绪时先返回 pending，前端后台重试，不再影响当前网络状态显示。执行 `AT+CFUN=1,1` 等模块重启动作后会重新套用同一段保护期：重启后读取类命令在模块 AT 口恢复前返回后台处理中，缓存补刷延迟到保护期结束后进行。只读命令刷新成功后通过 WebSocket 异步广播 `at_cache_updated` 事件（写帧带超时），页面据此即时静默刷新。缓存条目记录最近请求时间：周期刷新不再无条件常驻页面公共命令——所有命令（含页面公共命令）一律只在最近 2 分钟请求窗口内被页面 Fetch 请求过才参与周期刷新，启动预热后 lastRequested 仍为零值（从未被页面请求）的公共命令条目不参与刷新；页面打开时前端轮询（dashboard 2-60 秒、topbar 30 秒、短信存储 60 秒、QTEMP 60 秒等）持续续热，关闭页面后后台刷新最多再持续一个窗口（2 分钟）即停摆，空闲态 AT 通道与 CPU 只保留允许的常驻服务——短信转发 webhook 轮询（30 秒，仅启用时）与自动化（看门狗/定时重启/时间同步）；条目冷置后保留旧值，页面重访时 Fetch 检测 stale 按需重跑；非页面条目超过 15 分钟无请求时从缓存驱逐，手动一次性 AT 命令不会成为永久后台刷新任务；命令执行失败不刷新缓存时效，下次读取会重新执行；开机保护期内 worker 优先执行已就绪的命令，动作命令（重启/自愈）不会被等待中的读命令卡队。首页 `dashboard_data`、蜂窝网络页 `network_data`（settings）、网络设置页、系统设置页状态接口在开机保护期未就绪时均返回 `pending` 字段，前端自动重试或保持旧值，避免显示全默认值误导用户。
 
 | 类型/函数 | 功能 |
 |---|---|
 | `atCacheEntry` | 保存单条 AT 命令的缓存内容、错误、更新时间、最近请求时间、运行状态和等待者。 |
-| `atCommandCacheManager` | 管理 AT 缓存表、后台队列、周期刷新、mock 模式和开机 AT 启动保护时间；周期刷新会跳过单独型号命令 `AT+CGMM` 和短信列表 `CMGL`，避免型号成功缓存后仍定时重复查询，也避免离开短信页后后台继续刷新大量短信正文；周期刷新同时驱逐超过空闲阈值且不在页面公共命令集合内的条目。 |
-| `atCommandCache.Start(mockMode)` | 启动 AT 缓存 worker、周期刷新任务和首次首页预热；真实模块模式下会根据系统 uptime 跳过开机 35 秒内的不稳定读取期。 |
+| `atCommandCacheManager` | 管理 AT 缓存表、后台队列、周期刷新、mock 模式和开机 AT 启动保护时间；周期刷新会跳过单独型号命令 `AT+CGMM` 和短信列表 `CMGL`，避免型号成功缓存后仍定时重复查询，也避免离开短信页后后台继续刷新大量短信正文；周期刷新按最近 2 分钟请求窗口选取条目，所有命令（含页面公共命令）仅在窗口内被请求过才参与刷新，无人查看页面时整体停摆；周期刷新同时驱逐超过空闲阈值且不在页面公共命令集合内的条目。 |
+| `atCommandCache.Start(mockMode)` | 启动 AT 缓存 worker、周期刷新任务和首次首页预热（预热条目在页面实际请求前不参与周期刷新）；真实模块模式下会根据系统 uptime 跳过开机 35 秒内的不稳定读取期。 |
 | `Fetch(command, force, waitOverride)` | 读取 AT 缓存，并在需要时触发后台刷新或等待后台结果；处于开机保护期的读取类 AT 会立即返回 pending，不让页面卡住 3 秒以上。 |
 | `enqueue(command, force)` | 把 AT 命令加入后台队列，合并同命令并发请求。 |
 | `run(command)` | 后台执行 AT 命令、更新缓存并唤醒等待者；执行失败不更新缓存时间戳（下次读取重新执行，不在缓存期内反复返回错误文本）；动作类命令完成后会让读取类缓存失效；只读命令刷新成功后向前端广播 `at_cache_updated` 事件，页面可据此即时静默刷新。 |
 | `invalidateReadCache()` | 动作类 AT 完成后清空读取类缓存时间，避免页面继续显示旧状态。 |
-| `cachedReadCommandsNeedingRefresh()` | 返回已缓存且需要周期刷新的读取类 AT 命令；周期刷新只刷新已经被请求过的缓存项，非页面命令仅在最近 10 分钟请求窗口内参与刷新，不再每轮塞满全部常用命令。 |
+| `cachedReadCommandsNeedingRefresh()` | 返回已缓存且需要周期刷新的读取类 AT 命令；周期刷新只刷新已经被请求过的缓存项，所有命令（含页面公共命令）仅在最近 2 分钟请求窗口内参与刷新，无人查看时周期刷新整体停摆，不再每轮塞满全部常用命令。 |
 | `enqueueInitialReadCommands()` | 服务启动保护期结束后只预热首页读取命令，避免设备信息、网络、设置、短信等多条长命令在 AT 口未就绪时串行阻塞。 |
 | `enqueueCachedReadCommands()` | 动作类 AT 完成后只刷新已存在的读取类缓存项，不再强制刷新所有常用命令。 |
 | `waitUntilReadyFor()` / `startupDelayRemaining()` | 对读取类 AT 应用开机保护延迟；动作类 AT 和 mock 模式不受影响。 |
@@ -821,7 +543,7 @@ AT 命令分类与缓存分级策略的唯一定义点：动作命令不缓存�
 
 ### `go-build/simpleadmin-go/cmd/simpleadmin-httpd/version.go`
 
-构建注入版本号（`-ldflags "-X main.appVersion=..."`，Makefile/CI 默认取 `git describe`）。静态 HTML 中的 `?v=__SA_VERSION__` 占位符由静态文件服务与登录页在响应时替换为当前版本，发版不再需要手工修改前端缓存参数。
+构建注入版本号（`-ldflags "-X main.appVersion=..."`，Makefile/CI 默认取 `git describe`）。静态 HTML 中的 `__SA_VERSION__` 占位符由静态文件服务与登录页在响应时替换为当前版本（React 前端经 `<meta name="sa-version">` 读取；Vite 产物为内容寻址文件名，不再依赖 `?v=` 缓存参数）；`__SA_THEME__` 占位符同时被替换为设备保存的默认主题（`www/config/get_theme.json`），供入口 HTML 防闪脚本首屏定主题。
 
 ### `go-build/simpleadmin-go/cmd/simpleadmin-httpd/console_page.go`
 
@@ -885,20 +607,20 @@ Linux 下 TTL 规则管理。
 
 ### `go-build/simpleadmin-go/cmd/simpleadmin-httpd/native_firewall.go`
 
-Linux 下防火墙阻止/放行规则管理。Go 服务自管专用 `SADMIN_FW` iptables 链（仅 IPv4、TCP）；本页是 RGMII Toolkit 原 `simplefirewall` 脚本端口阻止能力的 Web 化管理（扩展支持放行规则与全部链统计），不修改原脚本，如果设备同时启用了原 `simplefirewall.service`，两者规则并存互不影响，建议二选一。
+Linux 下防火墙规则的原生执行层。Go 服务自管专用 `SADMIN_FW` iptables 链（仅 IPv4、TCP）与 DNAT 端口转发专用 `SADMIN_FWD` 链（nat 表，挂 PREROUTING）；本页是 RGMII Toolkit 原 `simplefirewall` 脚本端口阻止能力的 Web 化管理（扩展支持放行规则、全部链统计、IPv6 链只读展示与 DNAT 端口转发），不修改原脚本，如果设备同时启用了原 `simplefirewall.service`，两者规则并存互不影响，建议二选一。命令序列生成（`firewallIPTablesCommands`：先 `-F` 清空链，放行规则整体排在阻止规则之前，每个阻止端口先追加 `bridge0`/`eth0`/`tailscale0` 接口 ACCEPT 再追加其余接口 DROP；`firewallFwdIPTablesCommands`：建链/挂跳转/flush 重建 DNAT）与事务式回滚逻辑在平台无关的 `page_firewall.go`，本文件是 Linux exec 实现。
 
 | 类型/函数 | 功能 |
 |---|---|
-| `firewallIPTablesCommands(rules)` | 生成规则命令序列：先 `-F` 清空 `SADMIN_FW` 链；放行规则整体排在阻止规则之前（每个放行端口 1 条不限接口的 ACCEPT，确保放行优先命中）；每个阻止端口先追加在 `bridge0`、`eth0`、`tailscale0` 接口上放行的 3 条 ACCEPT，再追加对其余接口阻止的 1 条 DROP（同端口 ACCEPT 必须先于 DROP）；空规则列表即清空规则。 |
 | `runFirewallCommand(args)` | 执行单条 iptables 命令，10 秒超时，失败时返回带命令上下文的错误。 |
+| `runFirewallCommandOutput(command, args)` | 执行单条 iptables/ip6tables 命令并返回合并输出，10 秒超时，失败时返回带命令上下文（含输出摘要）的错误；是 `runtimeFirewallCommandRunner` 注入点的 Linux 默认实现，供链统计 dump、`status6` IPv6 只读展示与 nat 表转储使用。 |
 | `ensureFirewallChain()` | 确保 `SADMIN_FW` 链存在（`-N`，已存在时忽略），且已通过 `-I INPUT 1` 挂到 INPUT 链首位（先 `-C` 检查，避免重复挂载）。 |
-| `applyFirewallRules(rules)` | 确保链就绪后按命令序列重建 `SADMIN_FW` 链规则；空规则列表即清空（仅保留跳转）。 |
+| `applyFirewallRules(rules, oldRules)` | 确保链就绪后以事务语义重建 `SADMIN_FW` 链规则：新规则命令序列全部成功，或任一步失败时按 `oldRules`（调用方传入的当前落盘旧规则）重放恢复链，不允许停留在半套新规则的残缺态；空规则列表即清空（仅保留跳转）；`oldRules` 为 nil 表示无已知旧规则，失败时链被重建为空。 |
 | `firewallDumpChains()` | 执行 `iptables -vnL -x --line-numbers`（10 秒超时）并解析设备全部链的计数与规则，供 `status` 动作返回所有防火墙规则统计。 |
-| `applySavedFirewallAtStartup()` | 服务启动时从配置文件恢复已保存的阻止/放行规则，实现重启后自动恢复；失败仅告警不阻断启动。 |
+| `applySavedFirewallAtStartup()` | 服务启动时从配置文件恢复已保存的阻止/放行规则，并调用 `applySavedFirewallFwdAtStartup()` 恢复 DNAT 端口转发规则，实现重启后自动恢复；失败仅告警不阻断启动（启动恢复无旧规则可回退，应用失败时链重建为空，规则仍在配置文件、下次启动重试）。 |
 
 ### `go-build/simpleadmin-go/cmd/simpleadmin-httpd/native_firewall_stub.go`
 
-非 Linux 构建的防火墙占位实现。规则应用与全部链统计（`firewallDumpChains`）返回“仅 Linux 支持”错误、启动恢复为空操作，用于 Windows 本地测试。
+非 Linux 构建的防火墙占位实现。规则应用（`applyFirewallRules`）、命令输出（`runFirewallCommandOutput`，`status6`/`fwd_*` 依赖）与全部链统计（`firewallDumpChains`）返回“仅 Linux 支持”错误、启动恢复为空操作，用于 Windows 本地测试。
 
 ### `go-build/simpleadmin-go/cmd/simpleadmin-httpd/native_system_power.go` / `native_system_power_stub.go`
 
@@ -958,7 +680,7 @@ Windows/mock 模式首页 AT 测试数据管理。保存整段 AT、QCAINFO、QE
 
 ### `go-build/simpleadmin-go/cmd/simpleadmin-httpd/mock_at_http.go`
 
-Windows/mock 模式网页端 mock AT 数据接口。该文件提供 `/api/mock_at` 的 handler，真实模块运行时直接拒绝，只有 `--mock` 模式允许浏览器开发者工具通过 `SimpleAdmin.MockAT.*` 写入或查看测试数据。
+Windows/mock 模式网页端 mock AT 数据接口。该文件提供 `/api/mock_at` 的 handler，真实模块运行时直接拒绝，只有 `--mock` 模式允许写入或查看测试数据；旧前端的 `SimpleAdmin.MockAT.*` 浏览器 Console 全局命令已随 Vue 管线退役，接口本身保留（经 `/api/ws` 网关访问，供测试代码与手工调试使用），日常注入推荐用 Windows 命令行窗口输入（见 `mock_at_console_windows.go`）。
 
 | 函数 | 功能 |
 |---|---|
@@ -966,7 +688,7 @@ Windows/mock 模式网页端 mock AT 数据接口。该文件提供 `/api/mock_a
 
 ### `go-build/simpleadmin-go/cmd/simpleadmin-httpd/mock_at_console_windows.go`
 
-Windows 本地测试命令行输入。支持 `at`、`qca`、`qeng`、`parse`、`show`、`clear`，方便不用修改 `index.js` 就能测试 AT 解析。
+Windows 本地测试命令行输入。支持 `at`、`qca`、`qeng`、`parse`、`show`、`clear`，方便不用改前端就能测试 AT 解析。
 
 ### `go-build/simpleadmin-go/cmd/simpleadmin-httpd/mock_at_console_stub.go`
 
@@ -989,8 +711,8 @@ Go 单元测试文件。
 | `TestWebsocketAcceptKey` | WebSocket 握手 key 计算。 |
 | `TestManagedTTLDeleteArgs` | TTL 规则删除参数生成。 |
 | `TestManagedTTLDeleteArgsIgnoresUnrelatedRules` | TTL 删除逻辑忽略非本项目规则。 |
-| `TestVuePagesHaveValidMountScripts` | Vue 页面挂载脚本存在。 |
-| `TestWebFrontendUsesVue3AndNoAlpine` | 前端使用 Vue 3，不使用 Alpine。 |
+| `TestVuePagesHaveValidMountScripts` | www HTML 入口守护（名称沿用旧版）：不含遗留 Alpine 事件指令，带 `src` 的 script 标签内不含会被浏览器忽略的内联代码。 |
+| `TestWebFrontendIsReactBuild` | www 为 React（Vite）构建形态：旧 Vue3/Alpine 运行时文件（`vue.global.prod.js`/`vue-app.js`/`alpinejs.min.js`）已删除，`www/assets/` 产物存在且非空；根目录只保留 `index.html` 与 `login.html` 两个 HTML 入口，均挂载 `#root`、引用 `/assets/` 并保留 `__SA_VERSION__`/`__SA_THEME__` 占位符，且不再引用旧前端运行时。 |
 | `TestCollectATDeviceCandidatesSupportsConfigAndDefaults` | AT 设备候选收集和过滤。 |
 | `TestDefaultATDeviceCandidateOrderMatchesDirectSMDDesign` | 默认 AT 候选顺序保持直接 `/dev/smd11` 设计。 |
 | `TestMockDashboardPayloadOverrideParsesManualInput` / `TestMockQENGPayloadReplacesDefaultDashboardLines` | Windows/mock 手动输入首页 AT、QCAINFO、QENG 后能影响结构化解析结果。 |
@@ -1031,6 +753,41 @@ AT 命令、网络设置、系统设置三个页面端点（`/api/at_data`、`/a
 | `TestParseIPTablesChainDump` | `-vnL` 输出样本解析：链头 policy/references 双形态、跳过列头行、K/M/G 计数换算、规则行前 10 列且其余拼接为 Extra。 |
 | `TestMockModeFirewallSaveAndStatusOverWS` | mock 模式经 `/api/ws` 网关保存阻止/放行规则并读取状态：`ruleCount` 按放行×1、阻止×4 计数，`jumpInstalled` 为真，`chains` 含 `SADMIN_FW` 链且为 9 条规则条目（1 放行 + 2 阻止×4）；空参数清空后归零。 |
 | `TestFirewallSaveRejectsConflictingPortsOverWS` | `block_ports` 与 `accept_ports` 同时包含同一端口时保存返回 400 且 `ok:false`，错误文案含「端口冲突」。 |
+| `TestApplyFirewallRulesTransactional*`(4 个) | `SADMIN_FW` 链事务式重建：中途失败按旧规则重放恢复、成功时跳过恢复、恢复也失败时保留原始错误、`oldRules` 为 nil 时失败重建为空链。 |
+
+### `go-build/simpleadmin-go/cmd/simpleadmin-httpd/page_firewall6_fwd_test.go`
+
+防火墙 IPv6 只读展示与 DNAT 端口转发测试。
+
+| 测试 | 检查内容 |
+|---|---|
+| `TestFirewall6StatusParsesIP6TablesDump` | `status6` 把 ip6tables `-vnL` 输出解析为链统计返回（只读展示，经注入的执行器）。 |
+| `TestFirewall6StatusRunnerError` | `status6` 命令执行失败时返回 200 + `ok:false` + 错误说明，不伪装成空结果。 |
+| `TestFirewallFwdStateFromChainsAndCommands` | 从 nat 表链统计判断 `SADMIN_FWD` 链存在与 PREROUTING 跳转挂载状态；DNAT 命令序列生成（缺链则建链挂跳转、flush 重建、只为 enabled 规则写 DNAT）。 |
+| `TestFirewallFwdRulesFileRoundTrip` | `firewall_fwd.conf` 写入/读取往返一致，非法行容错。 |
+| `TestFirewallFwdSaveValidationMatrix` | `fwd_save` 参数校验矩阵：非法端口/协议/内网 IP、重复、超过 32 条上限等一律 400。 |
+| `TestFirewallFwdSaveSuccessCommandSequence` | 保存成功的命令序列：事务式重建 `SADMIN_FWD` 链成功后才落盘。 |
+| `TestFirewallFwdSaveRollsBackOnFailure` | 应用中途失败按旧规则回滚恢复 nat 链，且不落盘。 |
+| `TestFirewallFwdListChecksPersistedFileAndChain` | `fwd_list` 返回持久化规则列表并核对链/跳转挂载状态。 |
+| `TestFirewallFwdStartupRestoreUsesPersistedRules` | 开机恢复按持久化规则重放 nat 链。 |
+
+### `go-build/simpleadmin-go/cmd/simpleadmin-httpd/page_diag_test.go`
+
+网络诊断页端点测试。
+
+| 测试 | 检查内容 |
+|---|---|
+| `TestDiagHTTPProbeResponseFields` | `http_probe` 成功响应字段：`{ok:true,target,statusCode,latencyMs}`。 |
+| `TestDiagDefaultActionIsHTTPProbe` | 空 action 按 `http_probe` 处理。 |
+| `TestDiagHTTPProbeInvalidTarget` | 非法目标（空、非 http(s) scheme、无主机名）返回 400。 |
+| `TestDiagHTTPProbeConnectionRefused` | 探测不通返回 200 + `ok:false` + `error` + `latencyMs`，不伪装成空结果。 |
+| `TestDiagHTTPProbeMockDoerInjection` | 探测客户端 `diagHTTPClient` 注入点可替换，单测不出网。 |
+| `TestDiagHTTPProbeRedirectLimit` | 重定向超过 3 次返回最后一个 3xx 响应而非报错。 |
+| `TestDiagDNSQueryInvalidParams` | `dns_query` 非法 domain/server 返回 400。 |
+| `TestDiagDNSQueryLocalhost` | 缺省 server 走系统解析器解析 localhost。 |
+| `TestDiagDNSQueryMockDialerInjection` | 指定 server 的拨号函数 `diagResolverDialer` 注入点可替换，单测不出网。 |
+| `TestDiagDNSQueryUnreachableServer` | 指定 server 不可达返回 200 + `ok:false`。 |
+| `TestDiagUnknownAction` | 未知 action 返回 400。 |
 
 ### `go-build/simpleadmin-go/cmd/simpleadmin-httpd/api_websocket_fixes_test.go`
 
@@ -1050,9 +807,18 @@ AT 缓存生命周期测试。
 | 测试 | 检查内容 |
 |---|---|
 | `TestIdleNonPageCacheEntriesEvicted` | 非页面条目超过空闲阈值被驱逐。 |
-| `TestRefreshSelectionRequiresRecentRequestForNonPageCommands` | 非页面命令仅在最近请求窗口内参与周期刷新。 |
+| `TestRefreshSelectionRequiresRecentRequestForAllCommands` | 所有命令（含页面公共命令）仅在最近请求窗口内参与周期刷新；零值预热条目不刷新。 |
 | `TestATCacheRunFailureKeepsStaleTimestamp` / `TestATCacheRunSuccessRefreshesTimestamp` | 执行失败不刷新缓存时效，成功才刷新。 |
 | `TestActionCommandNotBlockedByWaitingReadCommand` | 开机保护期内动作命令不被等待中的读命令卡队。 |
+
+### `go-build/simpleadmin-go/cmd/simpleadmin-httpd/mock_at_responses_test.go`
+
+mock AT 应答分发测试（短信存储可视化条数据源）。
+
+| 测试 | 检查内容 |
+|---|---|
+| `TestMockSMSStorageResponse` | 前端存储组合命令 `AT+CPMS="SM";+CPMS?;+CPMS="ME";+CPMS?;+CSCA?` 应答含 SM/ME 读取三元组、UCS2 十六进制 `+CSCA` 行并以 `OK` 收尾；单独 `AT+CPMS?`（mem1 缺省 ME）与单独 `AT+CSCA?` 返回正确形状。 |
+| `TestMockSMSStorageBranchExclusions` | 分流保护：含 `+CPMS` 前缀的删除组合（CMGD）保持 default 回显不进存储分支；列表组合（CMGL）仍走短信列表分支。 |
 
 ### `go-build/simpleadmin-go/cmd/simpleadmin-httpd/ttl_api_fixes_test.go`
 
@@ -1157,7 +923,7 @@ AT 串口与运行器测试。
 | `go-build/README.md` | Go 构建目录说明。 |
 | `go-build/simpleadmin-go/` | Go 源码目录。 |
 
-根目录 `Makefile` 提供与 `.bat` 等价的跨平台构建目标：`make arm`（ARMv7 产物）、`make windows`（Windows 测试产物）、`make test`（`-count=1` 单元测试）、`make vet`、`make fmt-check`（gofmt 校验）、`make smoke`（前端模块装配冒烟测试）、`make css`（安装前端依赖并编译 Tailwind CSS v4 样式产物到 `development/simpleadmin/www/css/tailwind.css`）、`make css-check`（重新编译到临时文件并与已提交产物 diff，校验源码与产物一致）、`make clean`。`make css` 安装依赖时优先 `npm ci` 按锁文件精确还原；修改前端样式源码后必须执行 `make css` 并提交产物，设备端只服务已提交的 `tailwind.css`，运行时无构建。构建时把版本号（默认取 `git describe`）通过 `-X main.appVersion` 注入，服务运行期间将静态 HTML 中的 `?v=__SA_VERSION__` 占位符替换为该版本号，覆盖示例 `make arm VERSION=2.97`。`.github/workflows/ci.yml` 在 push/PR 时执行格式检查、静态分析、单元测试、前端样式构建一致性检查（`make css-check`）、前端冒烟测试与双平台交叉编译并上传产物。
+根目录 `Makefile` 提供跨平台构建目标。Go 链：`make all`（默认目标，arm + windows）、`make arm`（ARMv7 产物）、`make windows`（Windows 测试产物）、`make test`（`-count=1` 单元测试）、`make vet`、`make fmt-check`（gofmt 校验）、`make clean`。前端链：`make web-build`（安装依赖并构建 `development/simpleadmin/frontend-react/` 到 `dist/`，安装依赖时优先 `npm ci` 按锁文件精确还原）、`make web`（构建 + `scripts/sync-www.sh` 同步 `www/`，**保留 `www/config/`**；修改前端源码后必须执行并提交 `www/` 产物，设备端只服务已提交产物，运行时无构建）、`make web-test`（typecheck + lint + vitest）、`make web-dev`（Vite dev server :5173，`/api` 与 `/console` 反向代理到 :18080）、`make web-e2e`（Playwright 端到端测试）、`make web-size`（www 产物体积预算检查：初始壳层/echarts chunk/xterm chunk/总量四道闸门）、`make dev-mock-build` / `make dev-mock`（编译并运行 linux 原生 mock 后端二进制，监听 :18080）。旧 `make smoke`、`make css`、`make css-check` 已随旧 Vue/Tailwind 管线与 `frontend_smoke.js` 退役删除。构建时把版本号（默认取 `git describe`）通过 `-X main.appVersion` 注入，服务运行期间将静态 HTML 中的 `__SA_VERSION__` 占位符替换为该版本号（新前端经 `<meta name="sa-version">` 读取），覆盖示例 `make arm VERSION=2.97`。`.github/workflows/ci.yml`（Node 22）在 push/PR 时执行：Go 链格式检查、静态分析、单元测试与双平台交叉编译并上传产物（不变）；前端链 typecheck → lint → vitest → build → check-size → playwright（webServer 自起 dev-mock mock 后端）。
 
 ## Windows 测试目录 `windows-test/`
 
@@ -1165,10 +931,11 @@ AT 串口与运行器测试。
 |---|---|
 | `windows-test/run_windows_test.bat` | 启动 Windows 本地测试服务；批处理窗口输出中文提示，使用 GBK/CP936 编码和 CRLF 换行。 |
 | `windows-test/build_windows_test.bat` | 编译 Windows 测试用 `simpleadmin-httpd-windows-amd64.exe`；批处理窗口输出中文提示，使用 GBK/CP936 编码和 CRLF 换行。 |
-| `windows-test/frontend_smoke.js` | 前端模块装配冒烟测试：按 `index.html` 加载顺序装配 25 个模块（公共命名空间模块、`vue-app`、`populate-checkbox`、10 个页面工厂与 `simpleadmin-spa`），校验 `window.SimpleAdmin` 命名空间与关键方法完整，以及 `SimpleAdmin.Pages` 的 10 个页面工厂（含小区锁定 `celllock`）注册完整。用法 `node windows-test/frontend_smoke.js`。 |
 | `windows-test/bin/simpleadmin-httpd-windows-amd64.exe` | Windows 本地测试二进制。 |
 | `windows-test/data/` | Windows 本地测试数据目录，存放认证、证书、TTL 等测试文件。 |
 | `windows-test/README.md` | Windows 测试说明。 |
+
+旧 `windows-test/frontend_smoke.js`（前端模块装配冒烟测试）已删除，前端校验由 `frontend-react/` 的 vitest 单测与 `e2e/` Playwright 端到端测试承担（`make web-test` / `make web-e2e`）。
 
 ## 主要运行流程
 
@@ -1181,7 +948,7 @@ systemd 使用 /lib/systemd/system 成功启动时
   -> 初始化页面登录账号密码文件
   -> 读取 AT 候选设备
   -> 应用保存的 TTL
-  -> 应用保存的防火墙阻止/放行规则（重启自恢复）
+  -> 应用保存的防火墙阻止/放行规则与 DNAT 端口转发规则（重启自恢复）
   -> 启动 AT 后台缓存队列
   -> 按配置启停断网自愈看门狗轮询器、每日定时重启调度器、时间同步轮询器与短信转发轮询器
   -> 注册 login.html、/api/login、/api/logout、/api/ws 与 /api/console/ws
@@ -1224,7 +991,7 @@ simpleadmin-httpd 启动
   -> worker 优先执行队列中已就绪的命令，重启/自愈等动作命令不被等待中的读命令阻塞
   -> 读命令等保护期结束后再发送真实 AT
   -> 首次只预热首页数据，其他页面按需触发
-  -> 周期刷新只刷新已经被请求过的缓存项
+  -> 周期刷新只刷新最近 2 分钟请求窗口内被请求过的缓存项（含页面公共命令），无人查看时整体停摆
 ```
 
 目的：模块开机前约 35 秒内 AT 口可能不返回，此时不让 3 秒超时的多条 AT 命令串行堆积，避免打开后台后几分钟都没有数据。
@@ -1232,32 +999,30 @@ simpleadmin-httpd 启动
 ### 普通页面结构化数据流程
 
 ```text
-前端页面
-  -> SimpleAdmin.Api.*Data({ action: ...业务参数... })
+前端页面（features/<id>/hooks.ts）
+  -> lib/api/endpoints.ts 封装函数({ action: ...业务参数... })
   -> WebSocket /api/ws
-  -> 消息内 path 与当前页面对应：总览 /api/dashboard_data，设备信息 /api/device_info_data，蜂窝网络 /api/network_data，网络设置 /api/network_config_data，防火墙 /api/firewall_data，AT 命令 /api/at_data，系统设置 /api/system_data，短信 /api/sms_data
+  -> 消息内 path 与当前页面对应：总览 /api/dashboard_data，设备信息 /api/device_info_data，蜂窝网络 /api/network_data，网络设置 /api/network_config_data，防火墙 /api/firewall_data，AT 命令 /api/at_data，系统设置 /api/system_data，短信 /api/sms_data，网络诊断 /api/diag_data
   -> Go 后端按 action 映射 AT
   -> 读取或刷新后端 AT 缓存
   -> Go 后端解析 AT 原始返回
   -> 返回页面可直接使用的业务 JSON
-  -> JS 只负责显示、表单交互和提示
+  -> React 组件只负责显示、表单交互和提示
 ```
 
 ### AT 命令手动发送与兼容 AT 缓存流程
 
 ```text
 AT 命令页手动发送
-  -> SimpleAdmin.Api.atData({ action: 'manual_at', command })
+  -> atData({ action: 'manual_at', command })（lib/api/endpoints.ts）
   -> WebSocket /api/ws
   -> 消息内 path=/api/at_data
   -> handleATData()
   -> 后端 AT 队列发送并等待返回
   -> 返回原始 AT 文本，页面追加式显示并写入命令历史
 
-兼容调试读取（页面脚本不再调用）
-  -> SimpleAdmin.Api.getAT()
-  -> WebSocket /api/ws
-  -> 消息内 path=/api/get_atcache
+兼容调试读取（前端不再封装，仅手工调试）
+  -> POST /api/get_atcache（经 /api/ws 网关）
   -> handleGetATCache()
   -> 后端 AT 队列发送并缓存
   -> 返回原始 AT 文本供调试查看
@@ -1266,8 +1031,8 @@ AT 命令页手动发送
 ### 短信发送流程
 
 ```text
-sms.js sendSMS()
-  -> SimpleAdmin.Api.smsData({ action: 'send', number, message })
+features/sms 页发送
+  -> smsData({ action: 'send', number, message })（lib/api/endpoints.ts）
   -> WebSocket /api/ws
   -> 消息内 path=/api/sms_data
   -> handleSMSData()
@@ -1285,9 +1050,9 @@ sms.js sendSMS()
 ### 短信读取流程
 
 ```text
-sms.js requestSMS({ force: true }) / autoRefreshSMS()
-  -> 手动刷新或首次进入：SimpleAdmin.Api.smsData({ action: 'list', force: '1' })
-  -> 自动轮询：SimpleAdmin.Api.smsData({ action: 'list_meta', force: '1' })
+features/sms 页手动刷新 / 自动轮询（hooks.ts）
+  -> 手动刷新或首次进入：smsData({ action: 'list', force: '1' })
+  -> 自动轮询：smsData({ action: 'list_meta', force: '1' })
   -> WebSocket /api/ws
   -> 消息内 path=/api/sms_data
   -> 后端以 AT+CMGF=0;+CMGL=4 读取 PDU 模式短信列表
@@ -1298,7 +1063,7 @@ sms.js requestSMS({ force: true }) / autoRefreshSMS()
   -> 返回 messages / serviceCenters
   -> 页面收件箱按单行摘要显示发件人、时间和部分内容
   -> 点击摘要行后弹出详情，短信正文包含 LF、CR、VT、FF、Unicode 行分隔符或文本形式 \n / \r\n 时，后端返回 textLines，前端用文本节点和 <br> 按行显示完整内容
-  -> 停留在短信页时前端按固定时间轮询执行 autoRefreshSMS() 强制查询索引元信息
+  -> 停留在短信页时前端按固定时间轮询强制查询索引元信息（后台标签页不轮询）
   -> 前端记录当前短信索引集合，索引没有变化时不更新短信内容
   -> 发现索引变化后先缓存新索引元信息，不立即显示
   -> 后续轮询确认索引元信息稳定后，再拉取完整短信并一次性更新收件箱，避免多段短信只到达一部分时先显示半条
@@ -1308,8 +1073,8 @@ sms.js requestSMS({ force: true }) / autoRefreshSMS()
 ### 禁用 IP 透传重启通知流程
 
 ```text
-netconfig.js ipPassThroughDisable()
-  -> 前端提示“正在禁用 IP 透传，网口会重启”，并立即 startRebootCountdown(40)，先显示“重启中...”界面
+features/netconfig 页禁用 IP 透传
+  -> 前端提示“正在禁用 IP 透传，网口会重启”，并立即启动 40 秒重启倒计时（stores/reboot.ts），先显示“重启中...”遮罩
   -> /api/network_config_data action=ip_passthrough enabled=0
   -> handleNetworkConfigData() 立即返回 { ok:true, reboot:true, rebooting:true, rebootCountdownSeconds:40 }
   -> 后端延迟 1 秒后在后台执行 AT+QMAP="MPDN_RULE",0
@@ -1337,18 +1102,19 @@ netconfig.js ipPassThroughDisable()
 ### 控制台流程
 
 ```text
-浏览器 /#console
-  -> 单页内容区 iframe 加载 /console
-  -> iframe 高度跟随右侧内容区自动撑满
-  -> 控制台内部隐藏可见滚动条，避免内外双滚动
-  -> WebSocket /api/console/ws
+浏览器 #/console
+  -> features/console 页首次挂载（路由级懒加载分包）
+  -> xterm.js Terminal 初始化（懒连接：首次进入控制台才建 WebSocket）
+  -> WebSocket /api/console/ws（同源握手自动携带会话 Cookie）
   -> handleNativeConsoleWebSocket()
   -> 校验 Origin 与当前 Host/协议一致
   -> startNativeConsoleShell()
   -> PTY shell（TERM=xterm-256color / COLORTERM=truecolor）
   -> WebSocket frame 双向转发
-  -> iframe 内 ANSI SGR 渲染器显示彩色文本
+  -> xterm.js 渲染 ANSI 彩色文本，终端主题随亮/暗模式切换联动
 ```
+
+（后端仍保留 `/console` 内嵌终端页面 `handleNativeConsole()`，React 前端不再经 iframe 使用它。）
 
 ## 运行和调试命令
 
@@ -1391,7 +1157,7 @@ cat /usrdata/simpleadmin/at_devices.conf
 run_windows_test.bat
 ```
 
-Windows 测试服务使用 `--mock` 模式。启动后的命令行窗口支持手动输入首页 AT 测试数据，用于验证后端结构化解析是否正常：
+Windows 测试服务使用 `--mock` 模式（linux 侧等价为 `make dev-mock`）。启动后的命令行窗口支持手动输入首页 AT 测试数据，用于验证后端结构化解析是否正常：
 
 ```text
 simpleadmin-mock> at      粘贴整段首页 AT 返回，单独一行 .end 结束
@@ -1401,18 +1167,7 @@ simpleadmin-mock> parse   在控制台打印 /api/dashboard_data 的解析结果
 simpleadmin-mock> clear   清除手动输入，恢复默认 mock 数据
 ```
 
-也可以在浏览器开发者工具 Console 里输入；`index.js` 已不再内置 AT 测试常量，Windows mock 控制台输入仍然保留：
-
-```js
-SimpleAdmin.MockAT.at(`粘贴整段首页 AT 返回`)
-SimpleAdmin.MockAT.qca(`粘贴 QCAINFO 返回`)
-SimpleAdmin.MockAT.qeng(`粘贴 QENG 返回`)
-SimpleAdmin.MockAT.parse()
-SimpleAdmin.MockAT.show()
-SimpleAdmin.MockAT.clear()
-```
-
-简写别名：`saAt(...)`、`saQca(...)`、`saQeng(...)`、`saParseAT()`、`saShowAT()`、`saClearAT()`。这些接口只在 `--mock` 测试模式生效，模块真实运行时会拒绝。
+旧前端在浏览器开发者工具 Console 提供的 `SimpleAdmin.MockAT.*` / `saAt(...)` 等全局命令已随 Vue 管线退役；`/api/mock_at` 接口保留（只在 `--mock` 测试模式生效，模块真实运行时拒绝），mock 数据注入请使用上面的命令行窗口输入。
 
 ### Windows 重新编译 Go 后端
 

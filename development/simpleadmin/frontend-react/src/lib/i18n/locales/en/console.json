@@ -1,0 +1,11 @@
+{
+  "reload": "Reload",
+  "terminalTitle": "Module Console",
+  "pageDescription": "A browser-native PTY terminal to the module, streamed over WebSocket binary frames.",
+  "statusConnecting": "Connecting",
+  "statusConnected": "Connected",
+  "statusDisconnected": "Disconnected",
+  "reconnect": "Reconnect",
+  "terminalAria": "Module console terminal",
+  "consoleFooterHint": "The terminal connection is only established when this page is first opened and is closed on leaving; \"Reload\" reconnects and clears the screen."
+}

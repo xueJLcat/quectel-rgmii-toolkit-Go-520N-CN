@@ -3,3 +3,5 @@
 /go-build/simpleadmin-go/simpleadmin-httpd.exe
 /go-build/simpleadmin-go/cmd/simpleadmin-httpd/simpleadmin-httpd
 /go-build/simpleadmin-go/cmd/simpleadmin-httpd/simpleadmin-httpd.exe
+# linux 原生 mock 开发二进制(make dev-mock-build 产物,本机联调用,非发布产物)
+/windows-test/bin/simpleadmin-httpd-dev-mock

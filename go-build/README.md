@@ -15,7 +15,7 @@ build_simpleadmin_go.bat
 - Go 原生 TTL 管理
 - Go 原生 Web 控制台
 - `/api/*` handler，兼容 `/cgi-bin/*` 别名
-- Vue3 静态页面托管
+- React（Vite 构建产物 `www/`）静态页面托管
 
 默认 AT 候选固定为：
 

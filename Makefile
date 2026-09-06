@@ -40,7 +40,8 @@ WIN_OUT     := $(WIN_OUT_DIR)/simpleadmin-httpd-windows-amd64.exe
 # 另外注入版本号到 main.appVersion
 GO_BUILD_FLAGS := -buildvcs=false -trimpath -ldflags "-s -w -X main.appVersion=$(VERSION)"
 
-.PHONY: all arm windows test vet fmt-check smoke css css-check clean
+.PHONY: all arm windows test vet fmt-check clean \
+	web-build web web-test web-e2e web-size web-dev dev-mock-build dev-mock
 
 # 默认目标：同时产出 ARM 嵌入式版与 Windows 本地测试版
 all: arm windows
@@ -76,28 +77,57 @@ fmt-check:
 		echo "[通过] gofmt 格式检查"; \
 	fi
 
-# 前端模块装配冒烟测试（需要 node；按 index.html 顺序执行全部模块脚本）
-smoke:
-	node windows-test/frontend_smoke.js
-
 # ---------------------------------------------------------------------
-# 前端样式（Tailwind CSS v4）
-# 源码:development/simpleadmin/frontend/(input.css + src/components-*.css)
-# 产物:development/simpleadmin/www/css/tailwind.css(提交入库,设备端直接服务)
-# 修改前端源码后必须执行 make css 并提交产物;css-check 校验产物与源码一致。
-# 依赖安装:优先 `npm ci`(按 package-lock.json 精确还原,保证构建可复现)。
+# React 前端(Vite + React 19 + Tailwind CSS v4)
+# 源码:development/simpleadmin/frontend-react/
+# 产物:frontend-react/dist/(vite build 输出),make web 经 scripts/sync-www.sh
+#      同步到 development/simpleadmin/www/ 由 Go 后端静态托管。
+# 注意:www/config/ 是后端运行时写入目录(get_theme.json、get_language.json,
+#      见 server_config.go),同步脚本整目录保留;www/index.html 为后端启动校验项。
 # ---------------------------------------------------------------------
-FRONTEND_DIR := development/simpleadmin/frontend
-CSS_OUT      := development/simpleadmin/www/css/tailwind.css
-NPM_INSTALL  := cd "$(FRONTEND_DIR)" && \
-	{ [ -f package-lock.json ] && npm ci --no-audit --no-fund --silent || npm install --no-audit --no-fund --silent; }
+REACT_DIR := development/simpleadmin/frontend-react
+WWW_DIR   := development/simpleadmin/www
+SYNC_WWW  := $(REACT_DIR)/scripts/sync-www.sh
+DEV_MOCK  := $(WIN_OUT_DIR)/simpleadmin-httpd-dev-mock
 
-css:
-	$(NPM_INSTALL) && npx tailwindcss -i input.css -o ../www/css/tailwind.css --minify
+# 只构建 React 产物到 dist/(node_modules 缺失时先 npm ci),不改动 www
+web-build:
+	cd "$(REACT_DIR)" && { [ -d node_modules ] || npm ci --no-audit --no-fund; } && npm run build
 
-css-check:
-	$(NPM_INSTALL) && npx tailwindcss -i input.css -o /tmp/simpleadmin-tailwind-check.css --minify && \
-		diff -u "$(CURDIR)/$(CSS_OUT)" /tmp/simpleadmin-tailwind-check.css
+# 构建并同步:此目标会用 React 产物替换 www(保留 config/)
+web: web-build
+	cd "$(REACT_DIR)" && "$(CURDIR)/$(SYNC_WWW)" dist ../www
+
+# React 前端静态检查与单元测试(typecheck + eslint + vitest)
+web-test:
+	cd "$(REACT_DIR)" && npm run typecheck && npm run lint && npm test
+
+# React 前端 E2E 测试(Playwright;webServer 自行构建并直连 Go 二进制,
+# 不依赖本 Makefile 其他目标;需先 npx playwright install chromium)
+web-e2e:
+	cd "$(REACT_DIR)" && npx playwright test
+
+# 前端产物体积预算闸门(检查 www;CI 中对构建产物用 --dist dist,
+# 见 scripts/check-size.mjs 头部注释)
+web-size:
+	node "$(REACT_DIR)/scripts/check-size.mjs"
+
+# 前端开发服务器(前台运行;Vite dev server :5173,/api、/console 已代理到 127.0.0.1:18080)
+web-dev:
+	cd "$(REACT_DIR)" && npm run dev
+
+# linux 原生 mock 开发二进制(GOARCH 动态取本机;参数对齐 windows-test/run_windows_test.bat)
+dev-mock-build:
+	@mkdir -p "$(WIN_OUT_DIR)"
+	cd "$(GO_SRC)" && GOOS=linux GOARCH=$$($(GO) env GOARCH) CGO_ENABLED=0 GOTOOLCHAIN=local GOEXPERIMENT= \
+		$(GO) build $(GO_BUILD_FLAGS) -o "$(CURDIR)/$(DEV_MOCK)" $(GOTARGETS)
+
+# 前台运行 mock 开发服务器(http://127.0.0.1:18080,静态目录 www;
+# auth 文件不存在时自动写入默认 admin:admin)
+dev-mock: dev-mock-build
+	@mkdir -p windows-test/data
+	@[ -f windows-test/data/simpleadmin.auth ] || echo "admin:admin" > windows-test/data/simpleadmin.auth
+	"./$(DEV_MOCK)" -mock -no-tls -http 127.0.0.1:18080 -static "$(WWW_DIR)" -auth-file windows-test/data/simpleadmin.auth
 
 # 清理构建产物
 clean:

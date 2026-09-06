@@ -23,6 +23,18 @@ func runFirewallCommand(args []string) error {
 	return nil
 }
 
+// runFirewallCommandOutput 执行单条 iptables/ip6tables 命令并返回合并输出,
+// 10 秒超时,失败时返回带命令上下文(含输出摘要)的错误。
+func runFirewallCommandOutput(command string, args []string) (string, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	out, err := exec.CommandContext(ctx, command, args...).CombinedOutput()
+	if err != nil {
+		return "", fmt.Errorf("%s %s 执行失败: %v: %s", command, strings.Join(args, " "), err, strings.TrimSpace(string(out)))
+	}
+	return string(out), nil
+}
+
 // ensureFirewallChain 确保 SADMIN_FW 链存在且已挂到 INPUT 链首位。
 func ensureFirewallChain() error {
 	if out, err := exec.Command(iptablesCommand, "-N", firewallChainName).CombinedOutput(); err != nil {
@@ -59,19 +71,18 @@ func firewallDumpChains() ([]firewallChainInfo, error) {
 	return parseIPTablesChainDump(string(out)), nil
 }
 
-// applySavedFirewallAtStartup 启动时恢复已保存的防火墙规则,失败仅告警不阻断启动。
+// applySavedFirewallAtStartup 启动时恢复已保存的防火墙规则与 DNAT 转发规则,
+// 失败仅告警不阻断启动。
 func applySavedFirewallAtStartup() {
 	rules, err := readFirewallRulesFile(runtimeFirewallPortsFile)
 	if err != nil {
 		log.Printf("读取防火墙配置失败: %v", err)
-		return
+	} else if len(rules) > 0 {
+		// 启动时无已知旧规则可回退,传 nil:应用失败时把链重建为空,
+		// 避免停留在残缺态;规则仍在配置文件,下次启动会重试。
+		if err := applyFirewallRules(rules, nil); err != nil {
+			log.Printf("启动应用防火墙规则失败: %v", err)
+		}
 	}
-	if len(rules) == 0 {
-		return
-	}
-	// 启动时无已知旧规则可回退,传 nil:应用失败时把链重建为空,
-	// 避免停留在残缺态;规则仍在配置文件,下次启动会重试。
-	if err := applyFirewallRules(rules, nil); err != nil {
-		log.Printf("启动应用防火墙规则失败: %v", err)
-	}
+	applySavedFirewallFwdAtStartup()
 }
