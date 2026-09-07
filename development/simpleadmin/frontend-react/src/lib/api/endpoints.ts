@@ -492,7 +492,21 @@ export type TimesyncNowResult = OkResponse & {
 export interface SmsWebhookConfig {
   enabled?: boolean;
   url?: string;
+  /** POST(缺省)/GET/PUT;GET 以查询参数附带字段,模板不生效 */
+  method?: string;
+  /** 自定义请求头,每行一条 "Name: Value" */
+  headers?: string;
+  /** 单次请求超时秒数(1-120,缺省 10) */
+  timeoutSec?: number;
+  /** JSON 载荷模板,占位符 {sender}/{date}/{text}/{index}/{storage};空=内置缺省载荷 */
+  template?: string;
   lastNotifiedIndex?: number;
+}
+
+export interface SmsServerChanConfig {
+  enabled?: boolean;
+  /** Server酱 SendKey(SCT… = Turbo,sctp{uid}t… = Server酱³,端点自动识别) */
+  sendKey?: string;
 }
 
 export interface LanguageConfig {
@@ -623,6 +637,19 @@ export function smsWebhookGet(): Promise<SmsWebhookConfig> {
 
 export function smsWebhookSet(params: ApiParams): Promise<OkResponse> {
   return postForm<OkResponse>("/api/set_sms_webhook", params);
+}
+
+export function smsServerChanGet(): Promise<SmsServerChanConfig> {
+  return postForm<SmsServerChanConfig>("/api/get_sms_serverchan", {});
+}
+
+export function smsServerChanSet(params: ApiParams): Promise<OkResponse> {
+  return postForm<OkResponse>("/api/set_sms_serverchan", params);
+}
+
+/** 按当前已保存配置同步发送一条测试消息(webhook/serverchan),业务失败以 ok:false+error 返回 */
+export function smsForwardTest(channel: "webhook" | "serverchan"): Promise<OkResponse> {
+  return postForm<OkResponse>("/api/test_sms_forward", { channel });
 }
 
 export function languageGet(): Promise<LanguageConfig> {

@@ -13,6 +13,9 @@ import {
   postForm,
   setPassword,
   smsData,
+  smsForwardTest,
+  smsServerChanSet,
+  smsWebhookSet,
   systemMonitor,
   watchdogSet,
 } from "./endpoints";
@@ -144,6 +147,50 @@ describe("endpoints domain wrappers", () => {
       "POST",
       "/api/sms_data",
       "action=delete_indices&indices=ME%3A1%2CME%3A2",
+      FORM_HEADERS,
+    );
+  });
+
+  it("smsWebhookSet 扩展参数字段编码(多行 headers 与模板)", async () => {
+    requestSpy.mockResolvedValue(jsonResponse(200, '{"ok":true}'));
+    await expect(
+      smsWebhookSet({
+        enabled: "1",
+        url: "https://x/h",
+        method: "GET",
+        headers: "A: B",
+        timeoutSec: "30",
+        template: `{"m":"{text}"}`,
+      }),
+    ).resolves.toEqual({ ok: true });
+    expect(requestSpy).toHaveBeenCalledWith(
+      "POST",
+      "/api/set_sms_webhook",
+      "enabled=1&url=https%3A%2F%2Fx%2Fh&method=GET&headers=A%3A+B&timeoutSec=30&template=%7B%22m%22%3A%22%7Btext%7D%22%7D",
+      FORM_HEADERS,
+    );
+  });
+
+  it("smsServerChanSet 提交 enabled+sendKey", async () => {
+    requestSpy.mockResolvedValue(jsonResponse(200, '{"ok":true}'));
+    await expect(smsServerChanSet({ enabled: "1", sendKey: "SCT123Tabc" })).resolves.toEqual({
+      ok: true,
+    });
+    expect(requestSpy).toHaveBeenCalledWith(
+      "POST",
+      "/api/set_sms_serverchan",
+      "enabled=1&sendKey=SCT123Tabc",
+      FORM_HEADERS,
+    );
+  });
+
+  it("smsForwardTest 按通道提交 channel 参数", async () => {
+    requestSpy.mockResolvedValue(jsonResponse(200, '{"ok":true}'));
+    await expect(smsForwardTest("serverchan")).resolves.toEqual({ ok: true });
+    expect(requestSpy).toHaveBeenCalledWith(
+      "POST",
+      "/api/test_sms_forward",
+      "channel=serverchan",
       FORM_HEADERS,
     );
   });

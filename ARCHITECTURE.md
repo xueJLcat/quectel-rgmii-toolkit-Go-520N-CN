@@ -172,7 +172,7 @@ Simple_Admin_GO/
 
 | 文件 | 功能 |
 |---|---|
-| `index.html` | 登录成功后的单页管理界面入口（React SPA 外壳）：挂载点 `#root`，经 `modulepreload` 引用 `/assets/` 内容寻址分块（初始壳层 `main-*.js`、vendor/react-vendor/i18n/motion/query/echarts 等公共 chunk 与全局样式 `globals-*.css`）。左侧菜单切换 15 条 hash 路由页面（总览、系统监控、信号详情、蜂窝网络、小区锁定、网络详情、网络设置、防火墙、短信服务、AT 命令、控制台、网络诊断、自动化、系统设置、设备信息；按监控/网络/安全/通信/工具/系统六组归组），路由级懒加载按需分包。`<meta name="sa-version" content="__SA_VERSION__">` 携带构建注入的版本号（服务输出 HTML 时替换占位符，前端读取该 meta）；`data-bs-theme` 上的 `__SA_THEME__` 占位符由服务端替换为设备默认主题，head 内联防闪脚本结合 localStorage 决定首屏主题，无本地主题记录的浏览器首屏即按设备默认主题渲染。 |
+| `index.html` | 登录成功后的单页管理界面入口（React SPA 外壳）：挂载点 `#root`，经 `modulepreload` 引用 `/assets/` 内容寻址分块（初始壳层 `main-*.js`、vendor/react-vendor/i18n/motion/query/echarts 等公共 chunk 与全局样式 `globals-*.css`）。左侧菜单切换 16 条 hash 路由页面（总览、系统监控、信号详情、蜂窝网络、小区锁定、网络详情、网络设置、防火墙、短信服务、短信转发、AT 命令、控制台、网络诊断、自动化、系统设置、设备信息；按监控/网络/安全/通信/工具/系统六组归组），路由级懒加载按需分包。`<meta name="sa-version" content="__SA_VERSION__">` 携带构建注入的版本号（服务输出 HTML 时替换占位符，前端读取该 meta）；`data-bs-theme` 上的 `__SA_THEME__` 占位符由服务端替换为设备默认主题，head 内联防闪脚本结合 localStorage 决定首屏主题，无本地主题记录的浏览器首屏即按设备默认主题渲染。 |
 | `login.html` | 页面登录入口（Vite MPA 第二入口）：React 登录应用挂载 `#root`，与主界面共用 `/assets/` 公共分块；表单提交 `/api/login`，同样带 `__SA_THEME__` 防闪脚本并支持浅色/暗夜模式；登录成功后由后端写入 HttpOnly 会话 Cookie，再进入单页管理界面，不触发浏览器 Basic Auth 弹窗。 |
 
 ### 资源、字体和运行时配置
@@ -196,12 +196,12 @@ React 19 + TypeScript + Vite + Tailwind CSS v4 + shadcn/ui 前端源码。构建
 |---|---|
 | `index.html` / `login.html` | Vite MPA 双入口源文件；必须保留 `__SA_VERSION__`/`__SA_THEME__` 占位符约定。 |
 | `vite.config.ts` | 双入口 rollupOptions；manualChunks 拆出 react-vendor/vendor/query/i18n/motion/echarts/xterm 等公共 chunk，路由页面经动态 import 自动按页分包；dev server :5173，`/api` 与 `/console` 反向代理到 :18080（含 WebSocket）。 |
-| `src/app/` | `App.tsx`/`LoginApp.tsx`（双入口根组件）、`providers.tsx`（QueryClient/i18n/主题/toast 等全局 Provider）、`routes.tsx`（导航单一来源:15 路由 + 6 域分组，菜单/页面标题/浏览器标题/路由 id 全部取自该表）。 |
+| `src/app/` | `App.tsx`/`LoginApp.tsx`（双入口根组件）、`providers.tsx`（QueryClient/i18n/主题/toast 等全局 Provider）、`routes.tsx`（导航单一来源:16 路由 + 6 域分组，菜单/页面标题/浏览器标题/路由 id 全部取自该表）。 |
 | `src/lib/api/` | `gateway.ts`（`/api/ws` WebSocket 网关客户端：请求 id 匹配、断线退避重连、**每 15 分钟 `/api/get_uptime` 保活**、401 → sessionStorage 存当前 hash → 跳 `/login.html`）、`endpoints.ts`（全部页面 API 的类型化封装）、`auth.ts`（登录/注销）。 |
 | `src/lib/i18n/` | react-i18next 初始化；`locales/{zh-CN,en}/` 各 18 个命名空间 JSON（common/nav/login + 每个 feature 域一个，含新增 `diag`），`manifest.json` 注册命名空间。 |
 | `src/lib/theme/` | 亮暗主题读写（`data-bs-theme` + localStorage + 设备级 `/api/set_theme`）。 |
 | `src/components/` | `ui/`（shadcn/ui 基础组件）、`layout/`（侧栏/顶栏/页面骨架）、`common/`（空态、错误重试、危险区等跨页组件）、`charts/`（ECharts 按需封装）。 |
-| `src/features/` | 16 个功能域（15 路由 + login），域内约定见「前端功能域」一节。 |
+| `src/features/` | 17 个功能域（16 路由 + login），域内约定见「前端功能域」一节。 |
 | `src/stores/` | zustand 全局状态：`ui.ts`（侧栏/界面状态）、`confirm.ts`（确认框）、`reboot.ts`（重启倒计时）。 |
 | `src/styles/` | `tokens.css`（浅色/暗夜双份设计令牌）+ `globals.css`（Tailwind v4 入口与全局样式）。 |
 | `e2e/` | Playwright 端到端测试（`make web-e2e`；webServer 自起 dev-mock mock 后端）。 |
@@ -229,11 +229,12 @@ React 19 + TypeScript + Vite + Tailwind CSS v4 + shadcn/ui 前端源码。构建
 | `netdetail`（`#/netdetail`） | 网络详情：WAN/LAN 地址、各接口状态、局域网在线设备与租期。 |
 | `netconfig`（`#/netconfig`） | 网络设置：`/api/network_config_data` IP 透传、USB 网卡协议、DNS 代理（IPv4/IPv6、自定义上游 DNS）、LAN IP、DHCP 静态绑定（MAC–IP）。 |
 | `firewall`（`#/firewall`） | 防火墙（Tabs）：端口放行/阻止规则（`status`/`save`）、全部 iptables 链统计、**IPv6 链**（`status6`，ip6tables 只读展示）、**DNAT 端口转发**（`fwd_list`/`fwd_save`）、**DMZ**。 |
-| `sms`（`#/sms`） | 短信服务：收件箱（`list_meta` 索引轮询 + 稳定后拉全文）、发送（PDU）、删除、**短信存储可视化**（经 `manual_at` 拉取 `AT+CPMS?`/`AT+CSCA?` 组合命令——多命令行分号后不得再带 `AT` 前缀，否则真机语法错误致 AT 通道超时且 CPMS 滞留 SM；`+CSCA` 的 UCS2 十六进制应答由前端 `decodeMaybeUcs2` 解码，口径对齐后端 `decodeMaybeUCS2`——+ CMS 错误码释义）、**短信 Webhook 卡**（自旧自动化页迁入）。 |
+| `sms`（`#/sms`） | 短信服务：收件箱（`list_meta` 索引轮询 + 稳定后拉全文）、发送（PDU）、删除、**短信存储可视化**（经 `manual_at` 拉取 `AT+CPMS?`/`AT+CSCA?` 组合命令——多命令行分号后不得再带 `AT` 前缀，否则真机语法错误致 AT 通道超时且 CPMS 滞留 SM；`+CSCA` 的 UCS2 十六进制应答由前端 `decodeMaybeUcs2` 解码，口径对齐后端 `decodeMaybeUCS2`——+ CMS 错误码释义）。短信转发（Webhook/Server酱）已迁至独立页。 |
+| `smsforward`（`#/smsforward`） | 短信转发：**Webhook 卡**（自短信服务页迁入并扩展——请求方式 POST/GET/PUT、超时 1-120s、自定义请求头（每行 `Name: Value`）、JSON 载荷模板（占位符 `{sender}`/`{date}`/`{text}`/`{index}`/`{storage}`，保存前样例渲染校验 JSON 合法性）+ **Server酱 推送卡**（SendKey 自动识别 Turbo/Server酱³ 端点）；两通道独立开关，均带「发送测试」按钮（走已保存配置，表单脏态禁用防口径错位）。 |
 | `atcommands`（`#/atcommands`） | AT 命令：`/api/at_data` `manual_at` 任意 AT 透传、`reset_at`（`AT&F`，危险区二次确认）。 |
 | `console`（`#/console`） | 控制台：**xterm.js 原生终端**，路由首次挂载才建立 `/api/console/ws` 连接（懒连接），终端主题随亮暗切换联动；不再经 iframe 内嵌后端 `/console` 页面。 |
 | `diag`（`#/diag`） | 网络诊断（新增）：`/api/diag_data` `http_probe`（ICMP 被运营商屏蔽，连通性探测一律用 HTTP）与 `dns_query`（可指定上游 DNS 服务器）。 |
-| `automation`（`#/automation`） | 自动化：断网自愈看门狗、每日定时重启、时间同步（短信 Webhook 卡已迁至短信页）。 |
+| `automation`（`#/automation`） | 自动化：断网自愈看门狗、每日定时重启、时间同步（短信 Webhook 卡已迁至短信转发页）。 |
 | `settings`（`#/settings`） | 系统设置：设备操作（AT 重启/设备重启/关机）、IMEI、界面语言、默认主题、登录密码。 |
 | `deviceinfo`（`#/deviceinfo`） | 设备信息：`/api/device_info_data` 静态信息（制造商/固件/IMEI/IMSI/ICCID/号码）+ SIM/WWAN 在线状态。 |
 | `login`（`login.html`） | 登录页（MPA 独立入口）：`/api/login` 表单提交，读取公开端点 `/api/module_model` 显示模块型号。 |
@@ -257,7 +258,7 @@ Go 模块声明文件，模块名为 `simpleadmin-go`。
 | `server_auth.go` | 会话认证中间件、登录/注销、会话 Cookie 管理、登录失败限流。 |
 | `server_config.go` | 认证文件读写、改密、语言配置读写。 |
 | `server_tls.go` | 保留的 HTTPS 自签证书工具（默认 HTTP-only 不使用）。 |
-| `api_handlers.go` | AT 缓存、ping、短信、TTL、uptime、历史数据、看门狗/定时任务/时间同步/短信转发配置等小型 API handler。 |
+| `api_handlers.go` | AT 缓存、ping、短信、TTL、uptime、历史数据、看门狗/定时任务/时间同步/短信转发（Webhook 与 Server酱 配置、测试推送）等小型 API handler。 |
 | `at_cli.go` | `at` 调试子命令与 AT 调试日志工具。 |
 | `at_runner.go` | AT 事务执行：超时策略、候选设备重试、短信发送事务、设备候选过滤、回显关联读取。 |
 | `at_command_util.go` | AT 命令清理、组合命令拆分、回显标记定位工具。 |
@@ -269,7 +270,8 @@ Go 模块声明文件，模块名为 `simpleadmin-go`。
 | `timesync.go` | 时间同步：按配置间隔轮询单一 NTP 源（缺省阿里云 `ntp.aliyun.com`）并直接步进修改系统时间，另提供手动同步一次。 |
 | `native_timesync.go` / `native_timesync_stub.go` | Linux `settimeofday` 修改系统时间实现与非 Linux 平台桩。 |
 | `system_monitor.go` | 系统监控页 `/api/system_monitor`：CPU/内存占用、负载、进程 Top 20（按 CPU 或内存排序）。 |
-| `sms_webhook.go` | 新短信到达时向配置的 Webhook 地址推送通知；含 30 秒后台轮询器（按配置启停，关闭即停），无人打开网页时也能触发转发。 |
+| `sms_webhook.go` | 新短信到达检测（逐存储高水位）并向已启用通道分发：Webhook（可配请求方式/请求头/超时/JSON 载荷模板）与 Server酱；含 30 秒后台轮询器（任一通道启用即运行，全部关闭即停），无人打开网页时也能触发转发。 |
+| `sms_serverchan.go` | Server酱 推送通道（sct.ftqq.com 公开 API）：按 SendKey 前缀自动推导 Turbo/Server酱³ 端点，`{"title","desp"}` JSON 推送，应答 `code!=0` 视为失败；错误文本剥离 URL 防 SendKey 泄露。 |
 | `version.go` | 构建注入版本号与 HTML 占位符替换：`__SA_VERSION__`（新前端经 `<meta name="sa-version">` 读取）与 `__SA_THEME__`（替换为设备保存的默认主题，首屏防闪）。 |
 | `console_page.go` | Web 控制台内嵌终端页面 HTML/JS 常量（仅 Linux）。 |
 | `mock_at_responses.go` | mock 模式 AT 响应常量与生成函数（原型：目标模块移远 RM520N-CN）。 |
@@ -483,7 +485,7 @@ PDU 模式短信编解码逻辑。
 
 ### `go-build/simpleadmin-go/cmd/simpleadmin-httpd/at_cache.go`
 
-AT 后台发送与缓存管理。页面通过缓存接口读取数据；缓存缺失、过期、强制刷新或设置类命令会进入后台队列，由后台 worker 串行发送 AT，并把返回写入缓存。系统刚开机时会按 `/proc/uptime` 做 AT 启动保护：开机 35 秒内多数读取类 AT 不阻塞页面等待，只返回后台处理中，避免模块 AT 口未就绪时多条长超时命令串行拖慢后台；`AT+CGMM` 属于静态型号查询，允许绕过开机保护立即执行并由后端短暂重试；成功获取一次型号后写入 `simpleadmin-httpd` 运行期缓存，后续页面刷新、页面切换、登录页和后台主页面品牌显示都直接复用缓存，不再自动加入周期刷新或重复发送该指令。设备信息页把静态信息、SIM/WWAN 实时状态和 LANIP 拆成三组缓存；蜂窝网络页把锁定频段、网络偏好/APN/小区锁配置和实时 `QCAINFO` 拆开缓存；网络设置页 QMAP/QCFG 配置和 LANIP 使用配置缓存；短信列表不会加入后台周期刷新，只由短信页自身固定轮询触发，避免离开短信页后仍持续 `CMGL`。蜂窝网络页频段读取支持按模式或一次性查询 LTE/NSA/SA 当前已锁定频段；页面在获取型号并渲染当前可用频段后会立即强制发送查询，普通刷新仍支持 `wait=0` 非阻塞模式，首次查询未就绪时先返回 pending，前端后台重试，不再影响当前网络状态显示。执行 `AT+CFUN=1,1` 等模块重启动作后会重新套用同一段保护期：重启后读取类命令在模块 AT 口恢复前返回后台处理中，缓存补刷延迟到保护期结束后进行。只读命令刷新成功后通过 WebSocket 异步广播 `at_cache_updated` 事件（写帧带超时），页面据此即时静默刷新。缓存条目记录最近请求时间：周期刷新不再无条件常驻页面公共命令——所有命令（含页面公共命令）一律只在最近 2 分钟请求窗口内被页面 Fetch 请求过才参与周期刷新，启动预热后 lastRequested 仍为零值（从未被页面请求）的公共命令条目不参与刷新；页面打开时前端轮询（dashboard 2-60 秒、topbar 30 秒、短信存储 60 秒、QTEMP 60 秒等）持续续热，关闭页面后后台刷新最多再持续一个窗口（2 分钟）即停摆，空闲态 AT 通道与 CPU 只保留允许的常驻服务——短信转发 webhook 轮询（30 秒，仅启用时）与自动化（看门狗/定时重启/时间同步）；条目冷置后保留旧值，页面重访时 Fetch 检测 stale 按需重跑；非页面条目超过 15 分钟无请求时从缓存驱逐，手动一次性 AT 命令不会成为永久后台刷新任务；命令执行失败不刷新缓存时效，下次读取会重新执行；开机保护期内 worker 优先执行已就绪的命令，动作命令（重启/自愈）不会被等待中的读命令卡队。首页 `dashboard_data`、蜂窝网络页 `network_data`（settings）、网络设置页、系统设置页状态接口在开机保护期未就绪时均返回 `pending` 字段，前端自动重试或保持旧值，避免显示全默认值误导用户。
+AT 后台发送与缓存管理。页面通过缓存接口读取数据；缓存缺失、过期、强制刷新或设置类命令会进入后台队列，由后台 worker 串行发送 AT，并把返回写入缓存。系统刚开机时会按 `/proc/uptime` 做 AT 启动保护：开机 35 秒内多数读取类 AT 不阻塞页面等待，只返回后台处理中，避免模块 AT 口未就绪时多条长超时命令串行拖慢后台；`AT+CGMM` 属于静态型号查询，允许绕过开机保护立即执行并由后端短暂重试；成功获取一次型号后写入 `simpleadmin-httpd` 运行期缓存，后续页面刷新、页面切换、登录页和后台主页面品牌显示都直接复用缓存，不再自动加入周期刷新或重复发送该指令。设备信息页把静态信息、SIM/WWAN 实时状态和 LANIP 拆成三组缓存；蜂窝网络页把锁定频段、网络偏好/APN/小区锁配置和实时 `QCAINFO` 拆开缓存；网络设置页 QMAP/QCFG 配置和 LANIP 使用配置缓存；短信列表不会加入后台周期刷新，只由短信页自身固定轮询触发，避免离开短信页后仍持续 `CMGL`。蜂窝网络页频段读取支持按模式或一次性查询 LTE/NSA/SA 当前已锁定频段；页面在获取型号并渲染当前可用频段后会立即强制发送查询，普通刷新仍支持 `wait=0` 非阻塞模式，首次查询未就绪时先返回 pending，前端后台重试，不再影响当前网络状态显示。执行 `AT+CFUN=1,1` 等模块重启动作后会重新套用同一段保护期：重启后读取类命令在模块 AT 口恢复前返回后台处理中，缓存补刷延迟到保护期结束后进行。只读命令刷新成功后通过 WebSocket 异步广播 `at_cache_updated` 事件（写帧带超时），页面据此即时静默刷新。缓存条目记录最近请求时间：周期刷新不再无条件常驻页面公共命令——所有命令（含页面公共命令）一律只在最近 2 分钟请求窗口内被页面 Fetch 请求过才参与周期刷新，启动预热后 lastRequested 仍为零值（从未被页面请求）的公共命令条目不参与刷新；页面打开时前端轮询（dashboard 2-60 秒、topbar 30 秒、短信存储 60 秒、QTEMP 60 秒等）持续续热，关闭页面后后台刷新最多再持续一个窗口（2 分钟）即停摆，空闲态 AT 通道与 CPU 只保留允许的常驻服务——短信转发轮询（30 秒，仅任一通道启用时）与自动化（看门狗/定时重启/时间同步）；条目冷置后保留旧值，页面重访时 Fetch 检测 stale 按需重跑；非页面条目超过 15 分钟无请求时从缓存驱逐，手动一次性 AT 命令不会成为永久后台刷新任务；命令执行失败不刷新缓存时效，下次读取会重新执行；开机保护期内 worker 优先执行已就绪的命令，动作命令（重启/自愈）不会被等待中的读命令卡队。首页 `dashboard_data`、蜂窝网络页 `network_data`（settings）、网络设置页、系统设置页状态接口在开机保护期未就绪时均返回 `pending` 字段，前端自动重试或保持旧值，避免显示全默认值误导用户。
 
 | 类型/函数 | 功能 |
 |---|---|
@@ -539,7 +541,11 @@ AT 命令分类与缓存分级策略的唯一定义点：动作命令不缓存�
 
 ### `go-build/simpleadmin-go/cmd/simpleadmin-httpd/sms_webhook.go`
 
-新短信到达通知。配置持久化为 `sms_webhook.conf`（enabled/url，URL 必须为 http/https）。短信列表每次解析后按存储索引高水位判断新条目（进程重启后首个**非空**扫描只初始化水位，不重复通知；收件箱确为空的有效扫描（应答含 OK 且无终结错误）以水位 -1 建立基线，保证空收件箱设备到达的第一条短信也能通知，不被基线消耗；开机保护期 pending/错误文本解析出的空列表为无效扫描，不消耗首扫，避免保护期假空导致存量消息全量重推；当前最大索引低于高水位时判定存储被清空/索引回绕，把高水位重置为当前最大值-1，该消息仍通知一次，避免索引复用后永久漏报新消息），对新消息异步 POST `{"sender","date","text","index"}` JSON 到配置 URL（10 秒超时，投递失败按 2 秒、8 秒间隔重试 2 次，共尝试 3 次，全部失败才记日志放弃）。新到达检测有两条触发路径：前端短信页轮询 `/api/sms_data` 时顺带执行；**服务端后台轮询器**每 30 秒主动拉取一次短信列表（经 `fetchPageAT(wait)` 复用 AT 缓存，缓存未过期直接命中、不额外占用串行通道），无人打开网页时新短信同样触发转发。轮询器**按配置启停**：保存配置时启用且 URL 非空才启动循环，关闭开关立即停止（等待间隔期间也能即时退出），禁用状态不驻留任何循环、零 AT 流量；服务启动时同样按已保存配置同步。`/api/get_sms_webhook` 与 `/api/set_sms_webhook` 提供状态读取与配置保存（默认仅经 `/api/ws` 网关分发）。
+新短信到达检测与转发分发（Webhook + Server酱 双通道共用一套高水位扫描）。Webhook 配置持久化为 `sms_webhook.conf`（enabled/url/method/headers/timeoutSec/template，URL 必须为 http/https，method 限 POST/GET/PUT，headers 每行 `Name: Value`，timeoutSec 1-120 缺省 10，template 保存前用含引号/反斜杠/换行的样例载荷渲染并校验 JSON 合法性）。短信列表每次解析后按存储索引高水位判断新条目（进程重启后首个**非空**扫描只初始化水位，不重复通知；收件箱确为空的有效扫描（应答含 OK 且无终结错误）以水位 -1 建立基线，保证空收件箱设备到达的第一条短信也能通知，不被基线消耗；开机保护期 pending/错误文本解析出的空列表为无效扫描，不消耗首扫，避免保护期假空导致存量消息全量重推；当前最大索引低于高水位时判定存储被清空/索引回绕，把高水位重置为当前最大值-1，该消息仍通知一次，避免索引复用后永久漏报新消息），对新消息按已启用通道各自异步投递（失败按 2 秒、8 秒间隔重试 2 次，共尝试 3 次，全部失败才记日志放弃）：Webhook 通道 POST/PUT 以模板（或缺省五字段 `{"sender","date","text","index","storage"}`）渲染 JSON 体——占位符替换值经 JSON 转义、`{index}` 为裸数字，自定义请求头逐条附加且显式 Content-Type 覆盖缺省 `application/json`；GET 不带请求体，五字段改为附加到 URL 查询参数（模板不生效）。新到达检测有两条触发路径：前端短信页轮询 `/api/sms_data` 时顺带执行；**服务端后台轮询器**每 30 秒主动拉取一次短信列表（经 `fetchPageAT(wait)` 复用 AT 缓存，缓存未过期直接命中、不额外占用串行通道），无人打开网页时新短信同样触发转发。轮询器**按配置启停**：任一通道启用且配置完整（Webhook 有 URL / Server酱 有 SendKey）才启动循环，全部关闭立即停止（等待间隔期间也能即时退出），禁用状态不驻留任何循环、零 AT 流量；服务启动时同样按已保存配置同步。`/api/get_sms_webhook` 与 `/api/set_sms_webhook` 提供状态读取与配置保存（默认仅经 `/api/ws` 网关分发）。
+
+### `go-build/simpleadmin-go/cmd/simpleadmin-httpd/sms_serverchan.go`
+
+Server酱 微信推送通道（对接 sct.ftqq.com 公开 API）。配置持久化为 `sms_serverchan.conf`（enabled/sendKey）。端点按 SendKey 前缀自动推导（官方 serverchan-sdk 口径）：`sctp{uid}t…`（Server酱³）→ `https://{uid}.push.ft07.com/send/{key}.send`，其余（Turbo，SCT 开头）→ `https://sctapi.ftqq.com/{key}.send`；SendKey 拼入 URL 路径，含空白或 URL 保留字符即拒绝保存。推送为 `{"title","desp"}` JSON POST：title 去除换行并按 rune 截断到 32 字符上限（官方限制），desp 为 Markdown 正文（发件人/时间/内容/存储/索引，段落以空行分隔）；应答 `code==0` 为成功，非 0 时把 `message`（额度用尽、频率限制等）并入错误返回。传输层错误剥离 `url.Error` 外层，确保 SendKey 不经日志或接口错误文本泄露；重试节奏与 Webhook 通道共用（2s/8s，共 3 次）。`/api/get_sms_serverchan`、`/api/set_sms_serverchan` 提供状态读取与配置保存，`/api/test_sms_forward`（channel=webhook|serverchan）用已保存配置同步发送一条样例测试消息（单次尝试不重试，业务失败以 200 + `ok:false,error` 返回便于页面 toast 原因）。
 
 ### `go-build/simpleadmin-go/cmd/simpleadmin-httpd/version.go`
 
@@ -889,6 +895,25 @@ TTL 与短信发送接口测试。
 | `TestSortProcessList` | CPU/内存两种排序（主键降序、次键另一指标降序、PID 升序）。 |
 | `TestMockSystemMonitorData` / `TestHandleSystemMonitorMock` / `TestHandleSystemMonitorSortParamNormalized` | mock 数据字段齐全、进程数不超 20 且按序；handler 输出 JSON 完整；非法 `sort` 参数回退按 CPU。 |
 | `TestReadLoadAverageShape` | 负载输出为三个数值或 `-`。 |
+
+### `go-build/simpleadmin-go/cmd/simpleadmin-httpd/sms_forward_channels_test.go`
+
+短信转发双通道测试：Webhook 扩展参数（配置校验/模板渲染/请求组装/请求头与超时投递）、Server酱（端点推导/标题清洗/消息构造/应答 code 判定/SendKey 不泄露/重试）、双通道分发与轮询器启停、测试推送与 set 接口。
+
+| 测试 | 检查内容 |
+|---|---|
+| `TestSMSWebhookConfigExtendedFields` / `TestSMSWebhookConfigRejectsInvalidExtendedFields` | 扩展字段落盘读回与状态归一化；非法 method/超时/请求头/模板拒绝保存。 |
+| `TestRenderSMSWebhookBody` / `TestValidateSMSWebhookTemplateRejectsBrokenJSON` | 缺省五字段载荷；模板占位符 JSON 转义替换、`{index}` 裸数字；坏模板拒绝。 |
+| `TestBuildSMSWebhookRequestGETUsesQuery` / `TestBuildSMSWebhookRequestPOSTHeadersAndTimeout` | GET 五字段入查询参数且保留原参数、无请求体；PUT 请求头/超时/体组装。 |
+| `TestDefaultSMSWebhookPostSendsMethodHeadersBody` | 真实 HTTP 校验 method/请求头/缺省与显式 Content-Type。 |
+| `TestServerChanSendURL` / `TestSanitizeServerChanTitle` / `TestBuildServerChanSMSMessage` | SCT/sctp 端点推导与非法 key 拒绝；标题去换行 + 32 rune 截断；Markdown 正文与兜底文案。 |
+| `TestSMSServerChanConfigReadWrite` | 配置持久化、0600 权限、非法 SendKey 拒绝。 |
+| `TestDefaultServerChanPostResponseCodes` / `TestDefaultServerChanPostErrorHidesSendKey` | `code==0` 成功、非 0 透传 message、非 JSON/HTTP 5xx 报错；错误文本不含 SendKey。 |
+| `TestDeliverSMSServerChanRetries` | 重试节奏 3 次尝试、中途成功即止、非法 key 不发起请求。 |
+| `TestNotifyNewSMSDispatchesBothChannels` / `TestNotifyNewSMSServerChanOnly` / `TestNotifyNewSMSBothChannelsDisabled` | 新到达同时分发两通道且内容一致；单通道只推该通道；全关不推进水位不误推。 |
+| `TestSyncSMSWebhookPollerServerChanChannel` / `TestSMSWebhookPollTickServerChanOnly` | Server酱 单通道启用也启动/维持轮询，关闭即停，SendKey 空不启动。 |
+| `TestHandleTestSMSForwardWebhook` / `TestHandleTestSMSForwardServerChan` / `TestHandleTestSMSForwardUnknownChannel` | 测试推送按已保存配置单次投递、未配置提示、code!=0 原因透传、未知通道 400。 |
+| `TestHandleSetSMSWebhookExtendedParams` / `TestHandleSetSMSServerChan` | set 接口扩展参数落盘、空值清除、非法值 400。 |
 
 ### `go-build/simpleadmin-go/cmd/simpleadmin-httpd/sms_webhook_poller_test.go`
 

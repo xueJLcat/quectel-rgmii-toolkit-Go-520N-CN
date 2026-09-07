@@ -1,4 +1,4 @@
-// 导航单一来源(设计方案 §4.2):15 路由 + 6 域分组。
+// 导航单一来源(设计方案 §4.2):16 路由 + 6 域分组。
 // 菜单 = 页标题 = 浏览器标题 = 路由 id 全部取自本表;feature 页经 lazy 从 @/features/<id>/page 分包加载。
 // titleKey 为 nav 命名空间键(locales/*/nav.json);document.title 拼接格式在 app/App.tsx
 // (对齐旧版 SimpleAdmin.Brand.setPageTitle:"页面标题 - 型号")。
@@ -6,6 +6,7 @@ import {
   ActivityIcon,
   BotIcon,
   CrosshairIcon,
+  ForwardIcon,
   GaugeIcon,
   ListTreeIcon,
   MessageSquareIcon,
@@ -119,6 +120,14 @@ export const PAGES: PageDef[] = [
     icon: MessageSquareIcon,
     titleKey: "smsService",
     lazy: () => import("@/features/sms/page"),
+  },
+  {
+    id: "smsforward",
+    path: "/smsforward",
+    groupId: "comm",
+    icon: ForwardIcon,
+    titleKey: "smsForwarding",
+    lazy: () => import("@/features/smsforward/page"),
   },
   {
     id: "atcommands",

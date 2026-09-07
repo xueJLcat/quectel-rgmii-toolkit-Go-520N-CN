@@ -152,6 +152,7 @@ remove_simpleadmin_go_files() {
     rm -f "$SIMPLEADMIN_DIR/scheduler.state"
     rm -f "$SIMPLEADMIN_DIR/timesync.conf"
     rm -f "$SIMPLEADMIN_DIR/sms_webhook.conf"
+    rm -f "$SIMPLEADMIN_DIR/sms_serverchan.conf"
     # 安装脚本生成的端口准备脚本与部署备份;异常退出残留的 AT 代理 Socket
     rm -f "$SIMPLEADMIN_DIR/prepare_simpleadmin_ports.sh"
     rm -f "$SIMPLEADMIN_DIR/at_proxy.sock"

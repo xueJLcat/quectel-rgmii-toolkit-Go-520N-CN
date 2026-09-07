@@ -1,4 +1,4 @@
-// 壳层测试:routes 导航契约(15 路由/6 分组/nav ns 词条/懒加载) + App 冒烟
+// 壳层测试:routes 导航契约(16 路由/6 分组/nav ns 词条/懒加载) + App 冒烟
 // (vi.mock @/lib/api 隔离 WebSocket:gateway 为 spy,dashboardData 固定数据,logout spy)。
 // motion 用真实时钟,断言最终态(先例:common.test.tsx)。
 import { render, screen, waitFor } from "@testing-library/react";
@@ -65,10 +65,10 @@ afterEach(() => {
 });
 
 describe("routes 契约", () => {
-  test("15 页,id/path 唯一且 path = /<id>", () => {
-    expect(PAGES).toHaveLength(15);
-    expect(new Set(PAGES.map((page) => page.id)).size).toBe(15);
-    expect(new Set(PAGES.map((page) => page.path)).size).toBe(15);
+  test("16 页,id/path 唯一且 path = /<id>", () => {
+    expect(PAGES).toHaveLength(16);
+    expect(new Set(PAGES.map((page) => page.id)).size).toBe(16);
+    expect(new Set(PAGES.map((page) => page.path)).size).toBe(16);
     for (const page of PAGES) {
       expect(page.path, `${page.id} 的 path 必须为 /${page.id}`).toBe(`/${page.id}`);
     }
@@ -109,7 +109,7 @@ describe("routes 契约", () => {
       monitor: ["dashboard", "sysmon"],
       network: ["signal", "network", "celllock", "netdetail", "netconfig"],
       security: ["firewall"],
-      comm: ["sms"],
+      comm: ["sms", "smsforward"],
       tools: ["atcommands", "console", "diag"],
       system: ["automation", "settings", "deviceinfo"],
     });

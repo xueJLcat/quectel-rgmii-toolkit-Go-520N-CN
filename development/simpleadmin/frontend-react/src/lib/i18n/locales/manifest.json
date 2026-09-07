@@ -1,7 +1,10 @@
 {
   "source": "../www/js/simpleadmin-lang.js",
   "defaultNamespace": "common",
-  "languages": ["zh-CN", "en"],
+  "languages": [
+    "zh-CN",
+    "en"
+  ],
   "namespaces": [
     "nav",
     "common",
@@ -13,6 +16,7 @@
     "netconfig",
     "firewall",
     "sms",
+    "smsforward",
     "atcommands",
     "console",
     "diag",
@@ -33,6 +37,7 @@
     "netconfig": 66,
     "firewall": 41,
     "sms": 31,
+    "smsforward": 31,
     "atcommands": 24,
     "console": 1,
     "diag": 38,

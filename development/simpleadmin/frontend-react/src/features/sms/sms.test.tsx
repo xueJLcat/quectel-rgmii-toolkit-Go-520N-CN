@@ -5,7 +5,7 @@ import { act, fireEvent, render, screen, waitFor } from "@testing-library/react"
 
 import "@/lib/i18n";
 import { Providers } from "@/app/providers";
-import { atData, deviceInfoData, smsData, smsWebhookGet, smsWebhookSet } from "@/lib/api";
+import { atData, deviceInfoData, smsData } from "@/lib/api";
 import { useConfirmStore } from "@/stores/confirm";
 
 import SmsPage from "./page";
@@ -46,15 +46,11 @@ vi.mock("@/lib/api", () => ({
   smsData: vi.fn(),
   atData: vi.fn(),
   deviceInfoData: vi.fn(),
-  smsWebhookGet: vi.fn(),
-  smsWebhookSet: vi.fn(),
 }));
 
 const smsDataMock = vi.mocked(smsData);
 const atDataMock = vi.mocked(atData);
 const deviceInfoDataMock = vi.mocked(deviceInfoData);
-const webhookGetMock = vi.mocked(smsWebhookGet);
-const webhookSetMock = vi.mocked(smsWebhookSet);
 
 const IMSI_CN = "460011234567890";
 
@@ -487,8 +483,6 @@ function mockApis(): void {
   });
   atDataMock.mockResolvedValue({ ok: true, response: STORAGE_RAW });
   deviceInfoDataMock.mockResolvedValue({ imsi: IMSI_CN });
-  webhookGetMock.mockResolvedValue({ enabled: false, url: "", lastNotifiedIndex: -1 });
-  webhookSetMock.mockResolvedValue({ ok: true });
 }
 
 function renderPage(): void {
@@ -594,21 +588,4 @@ describe("SmsPage 组件", () => {
     expect(await screen.findByText("客服/应急短号，不自动添加国家码")).toBeInTheDocument();
   });
 
-  test("Webhook 卡:URL 校验拦截非法地址,合法地址可保存", async () => {
-    renderPage();
-    const urlInput = await screen.findByPlaceholderText("https:// 开头的回调地址");
-    fireEvent.change(urlInput, { target: { value: "ftp://bad" } });
-    expect(screen.getByText("请输入 http:// 或 https:// 开头的地址")).toBeInTheDocument();
-    const saveButton = screen.getByRole("button", { name: "保存" });
-    expect(saveButton).toBeDisabled();
-    fireEvent.change(urlInput, { target: { value: "https://example.com/hook" } });
-    await waitFor(() => expect(saveButton).toBeEnabled());
-    fireEvent.click(saveButton);
-    await waitFor(() =>
-      expect(webhookSetMock).toHaveBeenCalledWith({
-        enabled: "0",
-        url: "https://example.com/hook",
-      }),
-    );
-  });
 });

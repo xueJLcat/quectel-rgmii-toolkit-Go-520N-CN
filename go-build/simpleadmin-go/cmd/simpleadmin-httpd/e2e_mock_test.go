@@ -323,7 +323,7 @@ func TestE2EMockModeAutomationAndHistoryAPIs(t *testing.T) {
 	ts, client := e2eTestServer(t)
 
 	// 三个自动化状态接口默认值可读。
-	for _, path := range []string{"/api/get_watchdog", "/api/get_scheduler", "/api/get_sms_webhook"} {
+	for _, path := range []string{"/api/get_watchdog", "/api/get_scheduler", "/api/get_sms_webhook", "/api/get_sms_serverchan"} {
 		resp := e2eWebSocketCall(t, ts, client, "a:"+path, "POST", path, "")
 		if status := fmt.Sprint(resp["status"]); status != "200" {
 			t.Fatalf("%s status = %v, want 200", path, resp["status"])

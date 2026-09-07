@@ -1,6 +1,6 @@
 // 短信服务页(域色 comm,设计方案 §6.9):存储可视化条(新)+ 收件箱(会话式列表/多选/详情)+
-// 发送表单(归一化预览/分段计数/CMS 释义)+ 短信转发 Webhook 卡(自自动化页迁入)。
-// 布局单列整行:四卡纵向堆叠各占一行;面板进场 stagger 40ms/项(§5.1);
+// 发送表单(归一化预览/分段计数/CMS 释义)。短信转发(Webhook/Server酱)已迁至独立页 #/smsforward。
+// 布局单列整行:三卡纵向堆叠各占一行;面板进场 stagger 40ms/项(§5.1);
 // 详情"回复"把号码带进发送表单(页面级联动)。
 import { motion } from "motion/react";
 import { useState } from "react";
@@ -12,7 +12,6 @@ import { useT } from "@/lib/i18n";
 import { InboxPanel } from "./components/InboxPanel";
 import { SendPanel } from "./components/SendPanel";
 import { StoragePanel } from "./components/StoragePanel";
-import { WebhookPanel } from "./components/WebhookPanel";
 import { useSmsImsi, useSmsInbox, useSmsStorage } from "./hooks";
 
 const STAGGER_STEP_S = 0.04;
@@ -61,9 +60,6 @@ export default function SmsPage() {
         </StaggerItem>
         <StaggerItem index={2}>
           <InboxPanel inbox={inbox} onReply={setSendNumber} />
-        </StaggerItem>
-        <StaggerItem index={3}>
-          <WebhookPanel />
         </StaggerItem>
       </div>
     </>

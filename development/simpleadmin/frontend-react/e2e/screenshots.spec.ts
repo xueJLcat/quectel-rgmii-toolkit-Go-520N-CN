@@ -1,6 +1,6 @@
 // README 截图重拍:登录态(storageState)、1440×900(全局 viewport)、亮色主题与
 // 中文界面(均为服务端/浏览器默认,无 localStorage 覆写),等待 mock 数据渲染稳定后
-// 对 8 页整页截图,覆盖写入仓库根 PNG/<同名>.png(替换旧 UI 截图)。
+// 对 9 页整页截图,覆盖写入仓库根 PNG/<同名>.png(替换旧 UI 截图)。
 import { test, expect } from "@playwright/test";
 import type { Page } from "@playwright/test";
 import fs from "node:fs";
@@ -18,6 +18,7 @@ const SHOT_PAGES = [
   "netconfig",
   "firewall",
   "sms",
+  "smsforward",
 ] as const;
 
 /** 数据渲染稳定锚点:页头出现、骨架屏(aria-busy)清零、页级关键 mock 数据就位。 */

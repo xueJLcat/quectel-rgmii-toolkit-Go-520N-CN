@@ -3,13 +3,13 @@
 //   对齐旧版 pages/sms.js;pending/error 绝不用空列表覆盖既有收件箱);
 // - useSmsStorage:存储可视化条数据(AT+CPMS?/AT+CSCA? 组合命令经 at_data manual_at 低频拉取);
 // - useSmsImsi:IMSI(device_info_data,静态字段长缓存)供号码归一化预览;
-// - useSendSms:发送流程(sim_status 前置检查 → send;失败提取 CMS 错误码释义,保留表单值);
-// - useSmsWebhook:短信转发 Webhook 配置 get/set(从自动化页迁入,契约不变)。
+// - useSendSms:发送流程(sim_status 前置检查 → send;失败提取 CMS 错误码释义,保留表单值)。
+// 短信转发 Webhook 配置 hooks 已随卡片迁至 features/smsforward。
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { toast } from "sonner";
 
-import { ApiError, atData, deviceInfoData, smsData, smsWebhookGet, smsWebhookSet } from "@/lib/api";
+import { ApiError, atData, deviceInfoData, smsData } from "@/lib/api";
 import type { SmsDataResponse } from "@/lib/api";
 import { useT } from "@/lib/i18n";
 import { useConfirmStore } from "@/stores/confirm";
@@ -424,30 +424,4 @@ export function describeSendFailure(error: unknown, t: (key: string) => string):
   const raw = error instanceof Error ? error.message : String(error ?? "");
   const info = explainCmsError(raw);
   return info ? `${info.label} — ${t(info.hintKey)}` : raw;
-}
-
-// ---------------------------------------------------------------------------
-// 短信转发 Webhook(从自动化页迁入,get/set 契约不变)
-// ---------------------------------------------------------------------------
-
-export function useSmsWebhook() {
-  const { t } = useT("sms");
-  const queryClient = useQueryClient();
-  const query = useQuery({ queryKey: ["smsWebhook"], queryFn: () => smsWebhookGet(), retry: 1 });
-  const mutation = useMutation({
-    mutationFn: (vars: { enabled: boolean; url: string }) =>
-      smsWebhookSet({ enabled: vars.enabled ? "1" : "0", url: vars.url }),
-    onSuccess: (data) => {
-      if (data.ok === false) {
-        toast.error(data.error ?? t("saveFailed", { ns: "common" }));
-      } else {
-        toast.success(t("saved", { ns: "common" }));
-      }
-      void queryClient.invalidateQueries({ queryKey: ["smsWebhook"] });
-    },
-    onError: () => {
-      toast.error(t("saveFailed", { ns: "common" }));
-    },
-  });
-  return { query, mutation };
 }

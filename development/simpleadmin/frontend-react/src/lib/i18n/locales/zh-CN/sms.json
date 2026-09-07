@@ -30,7 +30,7 @@
   "clearSms": "清空短信",
   "deleteAllMessages": "确定删除全部短信？",
   "failedToReadSms": "短信读取失败",
-  "pageDescription": "收发短信、查看模块与 SIM 卡存储占用，并可把新短信转发到 Webhook。",
+  "pageDescription": "收发短信，并查看模块与 SIM 卡存储占用；新短信转发已移至「短信转发」页。",
   "storageTitle": "短信存储",
   "storageMeLabel": "模块存储 (ME)",
   "storageSmLabel": "SIM 卡存储 (SM)",
@@ -71,14 +71,5 @@
   "cmsError341": "SIM 短信存储满或忙",
   "cmsError342": "SIM 短信存储满或忙",
   "cmsError350": "运营商拒绝发送（物联卡常见），请核实 SIM 卡短信业务是否开通，或稍后重试",
-  "cmsErrorGeneric": "发送被模块或网络拒绝，请稍后重试或联系运营商",
-  "forwardNewSmsToWebhook": "新短信转发到 Webhook",
-  "webhookUrl": "Webhook 地址",
-  "webhookUrlPlaceholder": "https:// 开头的回调地址",
-  "webhookUrlInvalid": "请输入 http:// 或 https:// 开头的地址",
-  "webhookUrlRequired": "启用转发时必须填写 Webhook 地址",
-  "webhookLoadFailed": "短信转发配置加载失败",
-  "webhookLastNotified": "最近已转发至索引 {{index}}",
-  "webhookNeverNotified": "尚未转发过短信",
-  "webhookFooterHint": "启用后设备检测到新短信会 POST 到该地址，失败自动重试；保存后立即生效。"
+  "cmsErrorGeneric": "发送被模块或网络拒绝，请稍后重试或联系运营商"
 }

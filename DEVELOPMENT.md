@@ -179,15 +179,15 @@ frontend-react/
 │   │   ├── layout/             # 侧栏/顶栏/页面骨架
 │   │   ├── common/             # 空态/错误重试/危险区等跨页组件
 │   │   └── charts/             # ECharts 按需封装
-│   ├── features/<id>/          # 16 个功能域:page.tsx + hooks.ts + lib.ts + components/
+│   ├── features/<id>/          # 17 个功能域:page.tsx + hooks.ts + lib.ts + components/
 │   ├── stores/                 # zustand:ui / confirm / reboot
 │   └── styles/                 # tokens.css(设计令牌)+ globals.css(Tailwind 入口)
 ├── e2e/                        # Playwright 端到端测试(make web-e2e)
 └── scripts/                    # sync-www.sh(dist→www 同步)+ migrate-i18n.mjs(迁移溯源)
 ```
 
-- 16 个 feature 域 = 15 条路由(dashboard/sysmon/signal/network/celllock/netdetail/netconfig/
-  firewall/sms/atcommands/console/diag/automation/settings/deviceinfo)+ login。
+- 17 个 feature 域 = 16 条路由(dashboard/sysmon/signal/network/celllock/netdetail/netconfig/
+  firewall/sms/smsforward/atcommands/console/diag/automation/settings/deviceinfo)+ login。
 - 路由用 **HashRouter**;`src/app/routes.tsx` 是导航单一来源(菜单/页面标题/浏览器标题/路由 id),
   feature 页经 `lazy` 懒加载,Vite 按页分 chunk(echarts/xterm/i18n 独立公共 chunk)。
 - 数据层用 **TanStack Query**:查询/变更/轮询集中在各域 `hooks.ts`;

@@ -13,7 +13,7 @@ const BENIGN_CONSOLE_ERRORS: RegExp[] = [
   /^WebSocket connection to 'ws:\/\/127\.0\.0\.1:\d+\/api\/console\/ws' failed: Data frame received after close$/,
 ];
 
-test("侧边栏依次走完 15 页:hash 变化 + PageHeader 标题 + 零未捕获异常", async ({ page }) => {
+test("侧边栏依次走完 16 页:hash 变化 + PageHeader 标题 + 零未捕获异常", async ({ page }) => {
   test.setTimeout(240_000);
   const pageErrors: string[] = [];
   const consoleErrors: string[] = [];

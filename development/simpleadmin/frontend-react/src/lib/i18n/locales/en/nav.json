@@ -7,6 +7,7 @@
   "cellularNetwork": "Cellular Network",
   "systemSettings": "System Settings",
   "smsService": "SMS Service",
+  "smsForwarding": "SMS Forwarding",
   "logOut": "Log Out",
   "menu": "Menu",
   "atCommands": "AT Commands",

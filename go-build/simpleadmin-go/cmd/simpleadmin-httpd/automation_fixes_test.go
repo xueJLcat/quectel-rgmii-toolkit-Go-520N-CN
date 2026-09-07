@@ -99,12 +99,12 @@ func TestSMSWebhookDeliveryGivesUpAfterRetries(t *testing.T) {
 	withShortSMSWebhookRetryDelays(t)
 
 	attempts := 0
-	smsWebhookPost = func(url string, body []byte) error {
+	smsWebhookPost = func(rq smsWebhookRequest) error {
 		attempts++
 		return errors.New("connection refused")
 	}
 
-	err := deliverSMSWebhook("http://example.com/hook", []byte(`{"index":1}`))
+	err := deliverSMSWebhook(smsWebhookConfig{URL: "http://example.com/hook"}, map[string]any{"index": 1})
 	if err == nil {
 		t.Fatal("全部失败时应返回错误")
 	}
@@ -122,7 +122,7 @@ func TestSMSWebhookDeliverySucceedsOnRetry(t *testing.T) {
 	withShortSMSWebhookRetryDelays(t)
 
 	attempts := 0
-	smsWebhookPost = func(url string, body []byte) error {
+	smsWebhookPost = func(rq smsWebhookRequest) error {
 		attempts++
 		if attempts == 1 {
 			return errors.New("temporary failure")
@@ -130,7 +130,7 @@ func TestSMSWebhookDeliverySucceedsOnRetry(t *testing.T) {
 		return nil
 	}
 
-	if err := deliverSMSWebhook("http://example.com/hook", []byte(`{"index":1}`)); err != nil {
+	if err := deliverSMSWebhook(smsWebhookConfig{URL: "http://example.com/hook"}, map[string]any{"index": 1}); err != nil {
 		t.Fatalf("重试后成功不应返回错误: %v", err)
 	}
 	if attempts != 2 {
@@ -154,7 +154,7 @@ func TestSMSWebhookDeliveryRetriesOverHTTP(t *testing.T) {
 	}))
 	t.Cleanup(ts.Close)
 
-	if err := deliverSMSWebhook(ts.URL, []byte(`{"index":1}`)); err != nil {
+	if err := deliverSMSWebhook(smsWebhookConfig{URL: ts.URL}, map[string]any{"index": 1}); err != nil {
 		t.Fatalf("第三次请求成功，不应返回错误: %v", err)
 	}
 	if got := atomic.LoadInt32(&received); got != 3 {

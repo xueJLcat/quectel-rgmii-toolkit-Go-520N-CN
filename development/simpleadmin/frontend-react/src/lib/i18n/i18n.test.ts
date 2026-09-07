@@ -23,7 +23,7 @@ function findKeyByZh(zh: string): { ns: string; id: string; en: string } {
 
 describe("资源加载", () => {
   it("每个命名空间在 zh-CN 与 en 都存在且条目数一致", () => {
-    expect(manifest.namespaces.length).toBe(18);
+    expect(manifest.namespaces.length).toBe(19);
     for (const ns of manifest.namespaces) {
       const zhBag = bundle("zh-CN", ns);
       const enBag = bundle("en", ns);

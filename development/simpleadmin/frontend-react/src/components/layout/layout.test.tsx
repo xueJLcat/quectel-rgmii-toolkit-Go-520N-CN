@@ -1,4 +1,4 @@
-// layout 组件测试:Sidebar(六组/15 项/aria-current/折叠态/退出确认)、MobileDrawer(滑入复用导航/点击关闭)、
+// layout 组件测试:Sidebar(六组/16 项/aria-current/折叠态/退出确认)、MobileDrawer(滑入复用导航/点击关闭)、
 // Topbar(活力芯片成功与失败降级/刷新 invalidate/断线细条/语言切换)、Panel/PageHeader(域色契约)。
 // vi.mock @/lib/api 隔离 WebSocket;motion 用真实时钟断言最终态(先例:common.test.tsx)。
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
@@ -88,9 +88,9 @@ function renderTopbar(client = createClient(), route = "/dashboard") {
 }
 
 describe("Sidebar", () => {
-  test("渲染六组分组标题与 15 个导航项", async () => {
+  test("渲染六组分组标题与 16 个导航项", async () => {
     const { container } = renderSidebar();
-    expect(await screen.findAllByRole("link")).toHaveLength(15);
+    expect(await screen.findAllByRole("link")).toHaveLength(16);
     const titles = container.querySelectorAll('[data-slot="nav-group-title"]');
     expect(titles).toHaveLength(6);
     expect([...titles].map((el) => el.textContent)).toEqual([
@@ -117,8 +117,8 @@ describe("Sidebar", () => {
     await user.click(screen.getByRole("button", { name: "切换导航" }));
     expect(screen.queryByText("总览")).not.toBeInTheDocument();
     expect(container.querySelectorAll('[data-slot="nav-group-title"]')).toHaveLength(0);
-    expect(screen.getAllByRole("link")).toHaveLength(15);
-    expect(container.querySelectorAll("li svg")).toHaveLength(15);
+    expect(screen.getAllByRole("link")).toHaveLength(16);
+    expect(container.querySelectorAll("li svg")).toHaveLength(16);
     expect(container.querySelector('[data-slot="sidebar"]')).toHaveClass(
       "w-[var(--sa-sidebar-collapsed-width)]",
     );
@@ -144,7 +144,7 @@ describe("Sidebar", () => {
 });
 
 describe("MobileDrawer", () => {
-  test("滑入复用 15 项导航,点击导航项后关闭", async () => {
+  test("滑入复用 16 项导航,点击导航项后关闭", async () => {
     const user = userEvent.setup();
     render(
       <QueryClientProvider client={createClient()}>
@@ -156,7 +156,7 @@ describe("MobileDrawer", () => {
     expect(screen.queryByRole("dialog")).toBeNull();
     act(() => useUiStore.getState().setMobileNavOpen(true));
     const dialog = await screen.findByRole("dialog");
-    expect(within(dialog).getAllByRole("link")).toHaveLength(15);
+    expect(within(dialog).getAllByRole("link")).toHaveLength(16);
     await user.click(within(dialog).getByRole("link", { name: "系统监控" }));
     await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
     expect(useUiStore.getState().mobileNavOpen).toBe(false);

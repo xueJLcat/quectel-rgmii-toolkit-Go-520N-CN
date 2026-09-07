@@ -7,6 +7,7 @@
   "cellularNetwork": "蜂窝网络",
   "systemSettings": "系统设置",
   "smsService": "短信服务",
+  "smsForwarding": "短信转发",
   "logOut": "退出登录",
   "menu": "菜单",
   "atCommands": "AT 命令",

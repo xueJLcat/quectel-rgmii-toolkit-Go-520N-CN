@@ -30,7 +30,7 @@
   "clearSms": "Clear SMS",
   "deleteAllMessages": "Delete all messages?",
   "failedToReadSms": "Failed to read SMS",
-  "pageDescription": "Send and receive SMS, view module and SIM storage usage, and forward new messages to a webhook.",
+  "pageDescription": "Send and receive SMS and view module and SIM storage usage; message forwarding now lives on the SMS Forwarding page.",
   "storageTitle": "SMS Storage",
   "storageMeLabel": "Module storage (ME)",
   "storageSmLabel": "SIM storage (SM)",
@@ -71,14 +71,5 @@
   "cmsError341": "SIM SMS storage full or busy",
   "cmsError342": "SIM SMS storage full or busy",
   "cmsError350": "Rejected by the carrier (common on IoT SIMs). Verify that SMS service is enabled on the SIM, or retry later.",
-  "cmsErrorGeneric": "Sending was rejected by the module or network; retry later or contact your carrier",
-  "forwardNewSmsToWebhook": "Forward New SMS to Webhook",
-  "webhookUrl": "Webhook URL",
-  "webhookUrlPlaceholder": "Callback URL starting with https://",
-  "webhookUrlInvalid": "Enter a URL starting with http:// or https://",
-  "webhookUrlRequired": "A webhook URL is required when forwarding is enabled",
-  "webhookLoadFailed": "Failed to load SMS forwarding configuration",
-  "webhookLastNotified": "Last forwarded up to index {{index}}",
-  "webhookNeverNotified": "No SMS forwarded yet",
-  "webhookFooterHint": "When enabled, the device POSTs new messages to this URL with automatic retries; changes take effect immediately after saving."
+  "cmsErrorGeneric": "Sending was rejected by the module or network; retry later or contact your carrier"
 }
