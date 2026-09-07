@@ -7,5 +7,11 @@
   "statusDisconnected": "Disconnected",
   "reconnect": "Reconnect",
   "terminalAria": "Module console terminal",
-  "consoleFooterHint": "The terminal connection is only established when this page is first opened and is closed on leaving; \"Reload\" reconnects and clears the screen."
+  "consoleFooterHint": "The terminal connection is only established when this page is first opened and is closed on leaving; \"Reload\" reconnects and clears the screen; Ctrl+F searches terminal output (WebGL-rendered with automatic fallback).",
+  "searchToggle": "Search terminal output",
+  "searchPlaceholder": "Search scrollback…",
+  "searchNext": "Next",
+  "searchPrev": "Previous",
+  "searchClose": "Close search",
+  "searchNoMatch": "No matches"
 }

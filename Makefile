@@ -27,7 +27,7 @@ GOTARGETS ?= ./cmd/simpleadmin-httpd
 # 覆盖示例：make arm VERSION=2.97
 # git 不可用(源码 tarball/非仓库拷贝)时的回退值与 version.go 的内置
 # 默认(appVersion)保持一致，避免同一代码出现两个"默认版本"。
-VERSION   ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo 2.99)
+VERSION   ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo 3.00)
 
 # Go 模块目录（含 go.mod，模块名 simpleadmin-httpd）
 GO_SRC := go-build/simpleadmin-go

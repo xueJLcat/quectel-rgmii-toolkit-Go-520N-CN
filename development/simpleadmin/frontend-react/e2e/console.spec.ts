@@ -15,3 +15,27 @@ test("xterm 挂载并显示连接状态「已连接」", async ({ page }) => {
   // 输入通路就位(xterm 隐藏 textarea 承载键盘输入)
   await expect(page.locator(".xterm-helper-textarea")).toBeAttached();
 });
+
+test("终端搜索浮层:Ctrl+F 打开、输入即搜、Esc 关闭", async ({ page }) => {
+  await page.goto("/#/console");
+  await expect(page.locator(".xterm")).toBeVisible({ timeout: 30_000 });
+  const panel = page.locator('[data-slot="panel"]').filter({ has: page.locator(".xterm") });
+  await expect(
+    panel.getByRole("button", { name: "搜索终端输出" }),
+  ).toBeVisible({ timeout: 30_000 });
+
+  // 终端聚焦后 Ctrl+F 唤起(拦截浏览器页内查找),浮层内输入触发真实 SearchAddon
+  await panel.locator(".xterm").click();
+  await page.keyboard.press("Control+f");
+  const search = panel.getByRole("search");
+  await expect(search).toBeVisible();
+  await search.locator("input").fill("root");
+  await page.keyboard.press("Escape");
+  await expect(search).toHaveCount(0);
+
+  // 工具栏按钮同样可开关
+  await panel.getByRole("button", { name: "搜索终端输出" }).click();
+  await expect(search).toBeVisible();
+  await panel.getByRole("button", { name: "关闭搜索" }).click();
+  await expect(search).toHaveCount(0);
+});

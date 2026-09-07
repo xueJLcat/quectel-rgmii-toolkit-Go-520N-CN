@@ -1,7 +1,9 @@
 // xterm 真实实现适配层(唯一 import @xterm 的模块):组件经工厂注入使用,
 // 单测用 vi.mock 替换本模块即可完全隔离真实终端渲染(jsdom 无渲染能力)。
-// xterm/fit 均被打进独立 "xterm" chunk(vite manualChunks),本页懒加载。
+// xterm/fit/webgl/search 均被打进独立 "xterm" chunk(vite manualChunks),本页懒加载。
 import { FitAddon } from "@xterm/addon-fit";
+import { SearchAddon } from "@xterm/addon-search";
+import { WebglAddon } from "@xterm/addon-webgl";
 import { Terminal } from "@xterm/xterm";
 import "@xterm/xterm/css/xterm.css";
 
@@ -9,6 +11,8 @@ import type {
   ConsoleSocketFactory,
   ConsoleSocketLike,
   FitLike,
+  SearchFactory,
+  SearchLike,
   TerminalFactory,
   TerminalLike,
 } from "./types";
@@ -34,7 +38,38 @@ export const defaultTerminalFactory: TerminalFactory = (
     scrollback: 5000,
     theme,
   });
-  return terminal as unknown as TerminalLike;
+  // WebGL 渲染器须在 open() 之后激活(需要 canvas 挂载):包装 open,激活失败
+  // (无 WebGL 上下文的环境)或运行中上下文丢失时 dispose,xterm 自动回落
+  // DOM 渲染器,终端功能不受影响——官方 README 的降级口径。
+  const openRenderer = terminal.open.bind(terminal);
+  const terminalLike = terminal as unknown as TerminalLike;
+  terminalLike.open = (element: HTMLElement) => {
+    openRenderer(element);
+    try {
+      const webgl = new WebglAddon();
+      webgl.onContextLoss(() => webgl.dispose());
+      terminal.loadAddon(webgl);
+    } catch {
+      // 无 WebGL:保持缺省 DOM 渲染器
+    }
+  };
+  return terminalLike;
 };
 
 export const defaultFitFactory = (): FitLike => new FitAddon() as unknown as FitLike;
+
+export const defaultSearchFactory: SearchFactory = (term: TerminalLike): SearchLike | null => {
+  try {
+    const addon = new SearchAddon();
+    term.loadAddon(addon);
+    return {
+      findNext: (query) => addon.findNext(query),
+      findPrevious: (query) => addon.findPrevious(query),
+      clearDecorations: () => addon.clearDecorations(),
+      dispose: () => addon.dispose(),
+    };
+  } catch {
+    // 终端尚未 open 等异常场景:搜索功能缺席,终端本体不受影响
+    return null;
+  }
+};

@@ -13,11 +13,13 @@
 //      (script src / modulepreload / stylesheet 合并去重),
 //      其中 echarts-*/xterm-* 由 ③④ 专款检查,不计入本项      ≤ 1000KB
 //   ③ assets/echarts-*.js 合计                              ≤ 560KB
-//   ④ assets/xterm-*.js 合计(如存在)                        ≤ 400KB
+//   ④ assets/xterm-*.js 合计(如存在)                        ≤ 450KB
 //
 // 阈值来源:设计方案 §8(初版 450/420/380,按 echarts 核心基线与实测上调为
 // 600/560/400;② 因 vendor chunk 进入 modulepreload 图、实测约 903KB,再上调
-// 为 1000KB,偏差已在方案风险节记录)。
+// 为 1000KB,偏差已在方案风险节记录)。④ 因控制台引入 @xterm/addon-webgl(GPU
+// 渲染,上下文不可用自动回落 DOM)与 @xterm/addon-search(回滚缓冲搜索)由
+// 400KB 上调为 450KB(实测约 396KB,仍为懒加载专款 chunk、不入初始壳层)。
 //
 // 超限打印明细并 exit 1;全部通过打印各项实测值与余量,exit 0。
 // =====================================================================
@@ -136,7 +138,7 @@ const items = [
   {
     label: "④ assets/xterm-*.js(如存在)",
     actual: xterm.bytes,
-    limit: 400 * KB,
+    limit: 450 * KB,
     detail: () => xterm.files.map((name) => `    ${name} = ${fmt(fileSize(join(target, "assets", name)))}`),
   },
 ];

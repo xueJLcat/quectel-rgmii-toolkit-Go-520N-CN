@@ -179,7 +179,7 @@ Simple_Admin_GO/
 
 | 文件或目录 | 作用 |
 |---|---|
-| `assets/*` | Vite 内容寻址构建产物（文件名带内容哈希的 JS/CSS 分块）：初始壳层、15 个路由页面 chunk、echarts/xterm/i18n/motion/query 等公共依赖 chunk 与全局样式 `globals-*.css`；提交入库，设备直接服务。`/assets/` 前缀在认证中间件里免会话（登录页依赖这些公共分块，见 `isPublicAuthPath`）。 |
+| `assets/*` | Vite 内容寻址构建产物（文件名带内容哈希的 JS/CSS 分块）：初始壳层、16 个路由页面 chunk、echarts/xterm/i18n/motion/query 等公共依赖 chunk 与全局样式 `globals-*.css`；提交入库，设备直接服务。`/assets/` 前缀在认证中间件里免会话（登录页依赖这些公共分块，见 `isPublicAuthPath`）。 |
 | `css/Poppins.css` | Poppins 字体样式声明，由入口 HTML 直接引入（公共资源，自 `frontend-react/public/` 原样复制）。 |
 | `fonts/*.woff2` | 本地字体文件（公共资源，自 `frontend-react/public/` 原样复制）。 |
 | `favicon.ico` | 浏览器标签页图标。 |
@@ -232,7 +232,7 @@ React 19 + TypeScript + Vite + Tailwind CSS v4 + shadcn/ui 前端源码。构建
 | `sms`（`#/sms`） | 短信服务：收件箱（`list_meta` 索引轮询 + 稳定后拉全文）、发送（PDU）、删除、**短信存储可视化**（经 `manual_at` 拉取 `AT+CPMS?`/`AT+CSCA?` 组合命令——多命令行分号后不得再带 `AT` 前缀，否则真机语法错误致 AT 通道超时且 CPMS 滞留 SM；`+CSCA` 的 UCS2 十六进制应答由前端 `decodeMaybeUcs2` 解码，口径对齐后端 `decodeMaybeUCS2`——+ CMS 错误码释义）。短信转发（Webhook/Server酱）已迁至独立页。 |
 | `smsforward`（`#/smsforward`） | 短信转发：**Webhook 卡**（自短信服务页迁入并扩展——请求方式 POST/GET/PUT、超时 1-120s、自定义请求头（每行 `Name: Value`）、JSON 载荷模板（占位符 `{sender}`/`{date}`/`{text}`/`{index}`/`{storage}`，保存前样例渲染校验 JSON 合法性）+ **Server酱 推送卡**（SendKey 自动识别 Turbo/Server酱³ 端点）；两通道独立开关，均带「发送测试」按钮（走已保存配置，表单脏态禁用防口径错位）。 |
 | `atcommands`（`#/atcommands`） | AT 命令：`/api/at_data` `manual_at` 任意 AT 透传、`reset_at`（`AT&F`，危险区二次确认）。 |
-| `console`（`#/console`） | 控制台：**xterm.js 原生终端**，路由首次挂载才建立 `/api/console/ws` 连接（懒连接），终端主题随亮暗切换联动；不再经 iframe 内嵌后端 `/console` 页面。 |
+| `console`（`#/console`） | 控制台：**xterm.js 原生终端**，路由首次挂载才建立 `/api/console/ws` 连接（懒连接），终端主题随亮暗切换联动；**WebGL 渲染**（`@xterm/addon-webgl`，open 后激活，上下文不可用/丢失自动回落 DOM 渲染器）与**回滚缓冲搜索**（`@xterm/addon-search`，工具栏按钮或 Ctrl/Cmd+F 唤起浮层，Enter 下一个、Shift+Enter 上一个、Esc 关闭并清除高亮，无命中红框提示）；不再经 iframe 内嵌后端 `/console` 页面。 |
 | `diag`（`#/diag`） | 网络诊断（新增）：`/api/diag_data` `http_probe`（ICMP 被运营商屏蔽，连通性探测一律用 HTTP）与 `dns_query`（可指定上游 DNS 服务器）。 |
 | `automation`（`#/automation`） | 自动化：断网自愈看门狗、每日定时重启、时间同步（短信 Webhook 卡已迁至短信转发页）。 |
 | `settings`（`#/settings`） | 系统设置：设备操作（AT 重启/设备重启/关机）、IMEI、界面语言、默认主题、登录密码。 |
@@ -1136,7 +1136,7 @@ features/netconfig 页禁用 IP 透传
   -> startNativeConsoleShell()
   -> PTY shell（TERM=xterm-256color / COLORTERM=truecolor）
   -> WebSocket frame 双向转发
-  -> xterm.js 渲染 ANSI 彩色文本，终端主题随亮/暗模式切换联动
+  -> xterm.js 渲染 ANSI 彩色文本（WebGL 渲染器，上下文不可用/丢失自动回落 DOM），终端主题随亮/暗模式切换联动，Ctrl+F 唤起 SearchAddon 搜索回滚缓冲
 ```
 
 （后端仍保留 `/console` 内嵌终端页面 `handleNativeConsole()`，React 前端不再经 iframe 使用它。）

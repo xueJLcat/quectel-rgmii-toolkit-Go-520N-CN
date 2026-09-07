@@ -1,7 +1,7 @@
 // console 页测试:纯函数(WS 地址/resize 帧 clamp 序列化/连接状态机/帧解码/亮暗配色)+
-// 组件测试(注入 fake WS 工厂与 fake xterm:懒连接、二进制帧读写、resize 防抖帧、
-// 断开重连、重载清屏、卸载 dispose、主题联动)。jsdom 无真 WS/xterm 渲染能力,
-// 真机验证留给集成阶段(安全红线:本机验证只连 127.0.0.1 mock)。
+// 组件测试(注入 fake WS 工厂与 fake xterm/search:懒连接、二进制帧读写、resize 防抖帧、
+// 断开重连、重载清屏、卸载 dispose、主题联动、搜索浮层 Ctrl+F/Enter/Esc 与无命中态)。
+// jsdom 无真 WS/xterm 渲染能力,真机验证留给集成阶段(安全红线:本机验证只连 127.0.0.1 mock)。
 import { act, fireEvent, render, screen } from "@testing-library/react";
 
 import "@/lib/i18n";
@@ -24,6 +24,8 @@ import type {
   ConsoleSocketLike,
   FitFactory,
   FitLike,
+  SearchFactory,
+  SearchLike,
   TerminalFactory,
   TerminalLike,
 } from "./types";
@@ -196,6 +198,12 @@ class FakeTerminal implements TerminalLike {
     this.loadAddonCalls += 1;
   }
 
+  keyEventHandlers: ((event: KeyboardEvent) => boolean)[] = [];
+
+  attachCustomKeyEventHandler(handler: (event: KeyboardEvent) => boolean): void {
+    this.keyEventHandlers.push(handler);
+  }
+
   write(data: string | Uint8Array): void {
     this.written.push(data);
   }
@@ -230,7 +238,35 @@ class FakeFit implements FitLike {
   }
 }
 
+class FakeSearch implements SearchLike {
+  /** 测试可拨:false 时 find* 返回未命中 */
+  result = true;
+  nextQueries: string[] = [];
+  previousQueries: string[] = [];
+  clearCalls = 0;
+  disposed = false;
+
+  findNext(term: string): boolean {
+    this.nextQueries.push(term);
+    return this.result;
+  }
+
+  findPrevious(term: string): boolean {
+    this.previousQueries.push(term);
+    return this.result;
+  }
+
+  clearDecorations(): void {
+    this.clearCalls += 1;
+  }
+
+  dispose(): void {
+    this.disposed = true;
+  }
+}
+
 let lastTerminal: FakeTerminal | null = null;
+let lastSearch: FakeSearch | null = null;
 
 // 模块级稳定工厂:避免每次 render 新身份触发挂载 effect 重建
 const socketFactory: ConsoleSocketFactory = (url) => new FakeSocket(url);
@@ -240,13 +276,19 @@ const terminalFactory: TerminalFactory = (theme) => {
   return term;
 };
 const fitFactory: FitFactory = () => new FakeFit();
+const searchFactory: SearchFactory = () => {
+  const search = new FakeSearch();
+  lastSearch = search;
+  return search;
+};
 
-function renderTerminal() {
+function renderTerminal(overrides?: { searchFactory?: SearchFactory }) {
   return render(
     <ConsoleTerminal
       socketFactory={socketFactory}
       terminalFactory={terminalFactory}
       fitFactory={fitFactory}
+      searchFactory={overrides?.searchFactory ?? searchFactory}
     />,
   );
 }
@@ -260,6 +302,7 @@ const textDecoder = new TextDecoder();
 beforeEach(() => {
   FakeSocket.instances = [];
   lastTerminal = null;
+  lastSearch = null;
 });
 
 afterEach(() => {
@@ -366,6 +409,7 @@ describe("ConsoleTerminal 组件", () => {
     act(() => socket.openNow());
     unmount();
     expect(lastTerminal?.disposed).toBe(true);
+    expect(lastSearch?.disposed).toBe(true);
     expect(socket.closeCalls).toBe(1);
   });
 
@@ -399,5 +443,110 @@ describe("ConsoleTerminal 组件", () => {
     });
     expect(screen.getByText("已连接")).toBeInTheDocument();
     expect(lastTerminal?.written).toHaveLength(0);
+  });
+
+  test("搜索浮层:按钮打开,输入即搜,Enter 下一个 / Shift+Enter 上一个", () => {
+    renderTerminal();
+    act(() => {
+      fireEvent.click(screen.getByRole("button", { name: /搜索终端输出/ }));
+    });
+    const input = screen.getByRole("search").querySelector("input");
+    expect(input).not.toBeNull();
+    act(() => {
+      fireEvent.change(input!, { target: { value: "err" } });
+    });
+    expect(lastSearch?.nextQueries).toEqual(["err"]);
+    act(() => {
+      fireEvent.keyDown(input!, { key: "Enter" });
+    });
+    expect(lastSearch?.nextQueries).toEqual(["err", "err"]);
+    act(() => {
+      fireEvent.keyDown(input!, { key: "Enter", shiftKey: true });
+    });
+    expect(lastSearch?.previousQueries).toEqual(["err"]);
+    // 上/下一个按钮
+    act(() => {
+      fireEvent.click(screen.getByRole("button", { name: /上一个/ }));
+      fireEvent.click(screen.getByRole("button", { name: /下一个/ }));
+    });
+    expect(lastSearch?.previousQueries).toEqual(["err", "err"]);
+    expect(lastSearch?.nextQueries).toEqual(["err", "err", "err"]);
+  });
+
+  test("搜索无命中:红框 + 无匹配提示;清空恢复", () => {
+    renderTerminal();
+    act(() => {
+      fireEvent.click(screen.getByRole("button", { name: /搜索终端输出/ }));
+    });
+    const input = screen.getByRole("search").querySelector("input")!;
+    lastSearch!.result = false;
+    act(() => {
+      fireEvent.change(input, { target: { value: "nope" } });
+    });
+    expect(screen.getByText("无匹配")).toBeInTheDocument();
+    expect(input).toHaveAttribute("aria-invalid", "true");
+    lastSearch!.result = true;
+    act(() => {
+      fireEvent.change(input, { target: { value: "ok" } });
+    });
+    expect(screen.queryByText("无匹配")).not.toBeInTheDocument();
+    expect(input).not.toHaveAttribute("aria-invalid", "true");
+  });
+
+  test("Esc 关闭搜索:清除高亮 + 终端回焦 + 状态复位", () => {
+    renderTerminal();
+    act(() => {
+      fireEvent.click(screen.getByRole("button", { name: /搜索终端输出/ }));
+    });
+    const input = screen.getByRole("search").querySelector("input")!;
+    act(() => {
+      fireEvent.change(input, { target: { value: "x" } });
+    });
+    const focusBefore = lastTerminal?.focusCalls ?? 0;
+    act(() => {
+      fireEvent.keyDown(input, { key: "Escape" });
+    });
+    expect(screen.queryByRole("search")).not.toBeInTheDocument();
+    expect(lastSearch?.clearCalls).toBe(1);
+    expect(lastTerminal?.focusCalls).toBe(focusBefore + 1);
+    // 再次打开为空查询
+    act(() => {
+      fireEvent.click(screen.getByRole("button", { name: /搜索终端输出/ }));
+    });
+    expect((screen.getByRole("search").querySelector("input") as HTMLInputElement).value).toBe("");
+  });
+
+  test("xterm 快捷键拦截:Ctrl+F 返回 false(不写入 PTY)并打开搜索浮层", () => {
+    renderTerminal();
+    const handler = lastTerminal?.keyEventHandlers[0];
+    expect(handler).toBeTypeOf("function");
+    let handled = true;
+    act(() => {
+      handled = handler!({ type: "keydown", ctrlKey: true, key: "f" } as KeyboardEvent);
+    });
+    expect(handled).toBe(false);
+    expect(screen.getByRole("search")).toBeInTheDocument();
+    // 普通按键放行给 xterm(返回 true,照常写入 PTY)
+    expect(handler!({ type: "keydown", key: "a" } as KeyboardEvent)).toBe(true);
+    // keypress 阶段不重复拦截
+    expect(handler!({ type: "keypress", ctrlKey: true, key: "f" } as KeyboardEvent)).toBe(true);
+  });
+
+  test("Ctrl+F 在终端上唤起搜索并拦截浏览器默认查找", () => {
+    renderTerminal();
+    const container = screen.getByRole("application", { name: "模块控制台终端" });
+    let prevented = true;
+    act(() => {
+      prevented = fireEvent.keyDown(container, { key: "f", ctrlKey: true });
+    });
+    expect(prevented).toBe(false); // fireEvent 返回 false = 已 preventDefault
+    expect(screen.getByRole("search")).toBeInTheDocument();
+  });
+
+  test("searchFactory 失败(null)时隐藏搜索按钮,终端照常工作", () => {
+    renderTerminal({ searchFactory: () => null });
+    expect(screen.queryByRole("button", { name: /搜索终端输出/ })).not.toBeInTheDocument();
+    act(() => latestSocket().openNow());
+    expect(screen.getByText("已连接")).toBeInTheDocument();
   });
 });

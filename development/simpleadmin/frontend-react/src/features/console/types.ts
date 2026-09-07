@@ -25,6 +25,8 @@ export interface TerminalLike {
   loadAddon(addon: unknown): void;
   write(data: string | Uint8Array): void;
   onData(handler: (data: string) => void): { dispose(): void };
+  /** 返回 false 表示 xterm 不处理该键(事件也不会写入 PTY);官方快捷键拦截口。 */
+  attachCustomKeyEventHandler(handler: (event: KeyboardEvent) => boolean): void;
   resize(cols: number, rows: number): void;
   reset(): void;
   focus(): void;
@@ -37,5 +39,14 @@ export interface FitLike {
   proposeDimensions(): { cols?: number; rows?: number } | undefined;
 }
 
+/** SearchAddon 最小接口(find* 返回是否命中,UI 据此显示无匹配)。 */
+export interface SearchLike {
+  findNext(term: string): boolean;
+  findPrevious(term: string): boolean;
+  clearDecorations(): void;
+  dispose(): void;
+}
+
 export type TerminalFactory = (theme: TerminalThemeColors) => TerminalLike;
 export type FitFactory = () => FitLike;
+export type SearchFactory = (term: TerminalLike) => SearchLike | null;

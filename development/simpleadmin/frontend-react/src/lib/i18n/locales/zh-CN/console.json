@@ -7,5 +7,11 @@
   "statusDisconnected": "断开",
   "reconnect": "重新连接",
   "terminalAria": "模块控制台终端",
-  "consoleFooterHint": "首次进入本页才建立终端连接，离开页面自动断开；「重载」会断开重连并清屏。"
+  "consoleFooterHint": "首次进入本页才建立终端连接，离开页面自动断开；「重载」会断开重连并清屏；Ctrl+F 搜索终端输出（WebGL 渲染，上下文不可用时自动回落）。",
+  "searchToggle": "搜索终端输出",
+  "searchPlaceholder": "搜索回滚缓冲…",
+  "searchNext": "下一个",
+  "searchPrev": "上一个",
+  "searchClose": "关闭搜索",
+  "searchNoMatch": "无匹配"
 }
