@@ -28,7 +28,7 @@ func ensureDnsmasqMarker() error {
 	return errors.New("dnsmasq 管理仅支持 Linux 设备环境")
 }
 
-func applyDNSUpstream(enabled bool, servers []string) error {
+func applyDNSUpstreamLocked(enabled bool, servers []string) error {
 	return errors.New("dnsmasq 管理仅支持 Linux 设备环境")
 }
 

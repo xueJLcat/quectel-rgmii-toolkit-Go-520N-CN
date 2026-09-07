@@ -54,8 +54,11 @@ func (s *simpleAdminServer) handleGetTTLStatus(w http.ResponseWriter, r *http.Re
 }
 
 func (s *simpleAdminServer) handleSetTTL(w http.ResponseWriter, r *http.Request) {
-	raw := r.URL.Query().Get("ttlvalue")
-	ttl, err := strconv.Atoi(stripNonDigits(raw))
+	raw := strings.TrimSpace(r.URL.Query().Get("ttlvalue"))
+	// 严格解析原始值,不做 stripNonDigits 预清洗:清洗会把 "-1" 洗成 "1"、
+	// "6.5" 洗成 "65",负数范围校验永不可达——ttlvalue=-1(常见的"关闭"
+	// 语义输入)被静默应用为 TTL=1(出站包一跳即丢,等效断网)且持久化重放。
+	ttl, err := strconv.Atoi(raw)
 	if err != nil || ttl < 0 || ttl > 255 {
 		writeJSON(w, http.StatusOK, map[string]any{"ok": false, "error": "invalid ttlvalue", "debug_logs": []string{"invalid ttlvalue"}})
 		return
@@ -240,15 +243,42 @@ func currentTTLValue() (int, bool) {
 	return v, true
 }
 
-// dialAnyTarget 对目标列表逐个发起 TCP 拨号,任一成功即返回 true。
+// dialAnyTarget 对目标列表并行发起 TCP 拨号,任一成功即返回 true。
 // 供 /api/get_ping、总览探测与看门狗联网检测共用。
+// 并行而非串行:串行拨号在总预算 ≤ 单目标超时的调用点(总览 1.5s、
+// get_ping 2s)会被首目标截断——首目标以"丢包超时"方式不可达(跨网阻断
+// 的典型形态,正是需要备用目标的场景)时,后续目标的 DialContext 因预算
+// 耗尽立即失败,多目标冗余形同虚设,持续误报"未连接"(看门狗路径曾以
+// watchdogProbeBudget 放大预算修复过同款缺陷)。并行拨号让每个目标都
+// 获得完整的 dialTargetTimeout,总耗时不超过单目标超时,首个成功即取消
+// 其余拨号;ctx 到期/取消时按当前结果返回。
 func dialAnyTarget(ctx context.Context, targets []string) bool {
+	if len(targets) == 0 {
+		return false
+	}
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	results := make(chan bool, len(targets))
 	for _, address := range targets {
-		d := net.Dialer{Timeout: dialTargetTimeout}
-		conn, err := d.DialContext(ctx, "tcp", address)
-		if err == nil {
-			_ = conn.Close()
-			return true
+		go func(address string) {
+			d := net.Dialer{Timeout: dialTargetTimeout}
+			conn, err := d.DialContext(ctx, "tcp", address)
+			if err == nil {
+				_ = conn.Close()
+				results <- true
+				return
+			}
+			results <- false
+		}(address)
+	}
+	for remaining := len(targets); remaining > 0; remaining-- {
+		select {
+		case ok := <-results:
+			if ok {
+				return true
+			}
+		case <-ctx.Done():
+			return false
 		}
 	}
 	return false

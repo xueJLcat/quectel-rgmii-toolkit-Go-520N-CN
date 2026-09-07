@@ -7,6 +7,7 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"path"
 	"strconv"
 	"strings"
 	"time"
@@ -81,8 +82,14 @@ func (s *simpleAdminServer) renewSessionCookie(w http.ResponseWriter, r *http.Re
 	setSessionCookie(w, r, cookie.Value, expiresAt)
 }
 
-func isPublicAuthPath(path string) bool {
-	switch path {
+func isPublicAuthPath(urlPath string) bool {
+	// 先规范化再匹配:r.URL.Path 是解码后的路径,/assets/%2e%2e/index.html
+	// 解码为 /assets/../index.html,直接前缀匹配会命中 /assets/ 放行,而
+	// ServeMux 按转义路径分发不产生 301,静态处理器再把 Clean 后的
+	// /index.html 读出来——受保护的 HTML 入口被未认证读取。path.Clean
+	// 把穿越段收敛掉后,/index.html 不再命中任何放行前缀。
+	p := path.Clean("/" + urlPath)
+	switch p {
 	case "/login.html", "/logout.html", "/api/login", "/api/logout", "/api/module_model", "/favicon.ico":
 		return true
 	}
@@ -90,9 +97,9 @@ func isPublicAuthPath(path string) bool {
 	// HTML,登录页会字体降级、样式错乱甚至脚本失效。/assets/ 为 React 前端(Vite)
 	// 的内容寻址构建产物(JS/CSS 分块),登录页与主应用共用,不含会话数据;
 	// index.html 等 HTML 入口仍受会话保护(favicon.ico 已在上方按精确路径放行)。
-	return strings.HasPrefix(path, "/css/") ||
-		strings.HasPrefix(path, "/fonts/") ||
-		strings.HasPrefix(path, "/assets/")
+	return strings.HasPrefix(p, "/css/") ||
+		strings.HasPrefix(p, "/fonts/") ||
+		strings.HasPrefix(p, "/assets/")
 }
 
 func (s *simpleAdminServer) handleLoginPage(w http.ResponseWriter, r *http.Request) {
@@ -333,6 +340,29 @@ func (s *simpleAdminServer) destroyRequestSession(r *http.Request) {
 	}
 	if s.sessionCookieIssuedAt != nil {
 		delete(s.sessionCookieIssuedAt, cookie.Value)
+	}
+	s.sessionMu.Unlock()
+}
+
+// destroyOtherSessions 销毁除当前请求会话外的全部会话。修改密码后调用:
+// 服务端会话是纯内存令牌,改密本身不会让已签发的令牌失效,被窃令牌
+// (HTTP-only 部署下 Cookie 明文过 LAN)在改密后仍可持续使用并无限滑动
+// 续期;吊销其余会话强制所有其他端重新用新密码认证,当前操作端不受影响。
+func (s *simpleAdminServer) destroyOtherSessions(r *http.Request) {
+	current := ""
+	if cookie, err := r.Cookie(sessionCookieName); err == nil {
+		current = cookie.Value
+	}
+	s.sessionMu.Lock()
+	for token := range s.sessions {
+		if token != current {
+			delete(s.sessions, token)
+		}
+	}
+	for token := range s.sessionCookieIssuedAt {
+		if token != current {
+			delete(s.sessionCookieIssuedAt, token)
+		}
 	}
 	s.sessionMu.Unlock()
 }

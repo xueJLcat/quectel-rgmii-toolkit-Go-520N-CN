@@ -9,37 +9,64 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"time"
 )
+
+// smsConcatUIDCounter 长短信拼接 uid 分配器(1..255 循环),见 sendSMSBusiness。
+var smsConcatUIDCounter uint32
 
 func (s *simpleAdminServer) handleSMSData(w http.ResponseWriter, r *http.Request) {
 	action := strings.TrimSpace(requestValue(r, "action"))
 	switch action {
 	case "", "list":
 		force := boolQuery(r, "force", false)
-		data, validStorages := s.fetchSMSListDualStorage(force)
-		notifyNewSMSByWebhookStorages(smsDataMessages(data), validStorages)
+		data, _ := s.scanSMSListWithWebhookNotify(force)
 		writeJSON(w, http.StatusOK, data)
 	case "list_meta":
 		force := boolQuery(r, "force", false)
-		data, validStorages := s.fetchSMSListDualStorage(force)
-		notifyNewSMSByWebhookStorages(smsDataMessages(data), validStorages)
+		data, _ := s.scanSMSListWithWebhookNotify(force)
 		writeJSON(w, http.StatusOK, smsListMetaOnly(data))
 	case "delete_all":
+		// 清空+水位重置整体与 webhook 扫描串行(见 smsWebhookScanMu):
+		// 不持锁时在途扫描可能带着"清空前"的旧快照在重置之后才推进水位,
+		// 把高水位又抬回旧值,复用低索引的新短信重新落入漏推窗口。
+		smsWebhookScanMu.Lock()
 		// ME 与 SM 两个存储分别清空,任一失败如实报告。
 		okME := atResponseOK(s.runPageAction(`AT+CPMS="ME","ME","ME";+CMGD=,4`))
 		okSM := atResponseOK(s.runPageAction(`AT+CPMS="SM","SM","SM";+CMGD=,4`))
+		// 清空成功的存储必须重置 webhook 高水位:旧水位(如 5)会让清空后
+		// 到达的低索引新短信(模块复用索引 1、2)被回绕启发式吞掉——只有
+		// 最大索引那条补发,更低索引的永久漏推,违反"宁可重复,不可漏报"。
+		// 仅重置清空成功的存储:失败的存储仍有存量短信,重置会导致全量重推。
+		if okME {
+			resetSMSWebhookState("ME")
+		}
+		if okSM {
+			resetSMSWebhookState("SM")
+		}
+		smsWebhookScanMu.Unlock()
 		writeJSON(w, http.StatusOK, map[string]any{"ok": okME && okSM, "me": okME, "sm": okSM})
 	case "delete_indices":
-		values := requestValues(r, "indices")
-		if len(values) == 1 && strings.Contains(values[0], ",") {
-			values = strings.Split(values[0], ",")
-		}
+		// 每个参数值都按逗号展开:混合传参(indices=1,2&indices=3)时旧实现
+		// 不拆分 "1,2",被 stripNonDigits 洗成 "12" 后静默删除错误索引的短信。
+		values := splitRequestListValues(requestValues(r, "indices"), ",")
 		if len(values) == 0 || (len(values) == 1 && strings.TrimSpace(values[0]) == "") {
 			writeJSON(w, http.StatusBadRequest, map[string]any{"ok": false, "error": "missing indices"})
 			return
 		}
-		writeJSON(w, http.StatusOK, s.deleteSMSIndicesByToken(values))
+		// 删除与 webhook 槽位登记整体与扫描串行(与 delete_all 同一约定):
+		// 模块会复用被删索引存放新短信,高水位机制识别不了"索引 ≤ 高水位的
+		// 新消息",必须登记释放槽位供下轮扫描补发;不持锁时在途扫描可能
+		// 带着删除前的旧快照推进状态,登记被交错覆盖。
+		smsWebhookScanMu.Lock()
+		result := s.deleteSMSIndicesByToken(values)
+		if tokens, _ := result["succeededTokens"].([]string); len(tokens) > 0 {
+			markSMSWebhookSlotsFreed(tokens)
+		}
+		delete(result, "succeededTokens")
+		smsWebhookScanMu.Unlock()
+		writeJSON(w, http.StatusOK, result)
 	case "sim_status":
 		raw := s.fetchPageAT(atKeySIMStatus, true, true)
 		// 开机/模块重启保护期内应答是 pending 占位文本,不是设备状态证据;
@@ -77,7 +104,7 @@ func (s *simpleAdminServer) handleSMSData(w http.ResponseWriter, r *http.Request
 // 缺卡标志时判未插卡。旧实现仅靠“未出现缺卡标志”取反,空/错误文本会误报已插卡。
 func smsSIMInserted(raw string) bool {
 	upper := strings.ToUpper(raw)
-	if strings.Contains(upper, "SIM NOT INSERTED") || strings.Contains(upper, "+CME ERROR: 10") {
+	if isSIMAbsentEvidence(upper) {
 		return false
 	}
 	for _, rawLine := range strings.Split(upper, "\n") {
@@ -181,6 +208,18 @@ func (s *simpleAdminServer) fetchSMSListDualStorage(force bool) (map[string]any,
 	return merged, validStorages
 }
 
+// scanSMSListWithWebhookNotify 执行一次"拉取列表 → webhook 通知"的整体串行
+// 扫描(见 smsWebhookScanMu):拉取在 smsWebhookMu 之外进行,页面强制刷新与
+// 后台轮询交错时,较旧的快照可能后推进高水位,触发回绕启发式把水位拉低,
+// 造成重复推送。页面 list/list_meta 与后台轮询共用本入口保证原子性。
+func (s *simpleAdminServer) scanSMSListWithWebhookNotify(force bool) (map[string]any, map[string]bool) {
+	smsWebhookScanMu.Lock()
+	defer smsWebhookScanMu.Unlock()
+	data, validStorages := s.fetchSMSListDualStorage(force)
+	notifyNewSMSByWebhookStorages(smsDataMessages(data), validStorages)
+	return data, validStorages
+}
+
 // mergeSMSListDual 合并 ME 与 SM 两个存储的解析结果:消息按 ME 在前、SM 在后
 // 拼接,各自保留 "storage" 标记。SM 无有效消息(读取失败或确为空)时只返回 ME。
 // 第二个返回值表示 SM 是否读到了有效消息。
@@ -198,7 +237,11 @@ func mergeSMSListDual(me, sm map[string]any) (map[string]any, bool) {
 			merged = append(merged, meMsgs...)
 			merged = append(merged, smMsgs...)
 			me["messages"] = merged
-			if _, hasSC := me["serviceCenters"]; !hasSC {
+			// ME 侧没有解析到短信中心时用 SM 侧的。必须判"内容为空"而不是
+			// "键是否存在":parseSMSListAT 恒写入 serviceCenters 键(哪怕空
+			// 切片),按键判断的旧实现使该合并永不生效,SM 独有的 +CSCA 信息
+			// 被静默丢弃,前端"短信中心"显示缺失。
+			if centers, _ := me["serviceCenters"].([]string); len(centers) == 0 {
 				me["serviceCenters"] = sm["serviceCenters"]
 			}
 			return me, true
@@ -231,6 +274,7 @@ func (s *simpleAdminServer) deleteSMSIndicesByToken(values []string) map[string]
 		return map[string]any{"ok": false, "error": "missing indices"}
 	}
 	result := map[string]any{"ok": true, "deleted": 0, "total": 0, "response": ""}
+	succeededTokens := []string{}
 	for _, storage := range order {
 		part := runSMSDeleteIndices(byStorage[storage], func(command string) string {
 			return smsDeleteRunForTest(s, command)
@@ -244,11 +288,25 @@ func (s *simpleAdminServer) deleteSMSIndicesByToken(values []string) map[string]
 				result["response"] = resp
 			}
 		}
+		if indices, ok := part["succeededIndices"].([]string); ok {
+			for _, index := range indices {
+				succeededTokens = append(succeededTokens, storage+":"+index)
+			}
+		}
 		if ok, _ := part["ok"].(bool); !ok {
 			result["ok"] = false
-			result["error"] = part["error"]
+			// 双存储都部分失败时错误汇总必须保留:直接覆盖会丢失先失败
+			// 存储的详情(含其已删计数),展示与实际聚合结果不一致。
+			if prev, _ := result["error"].(string); prev != "" {
+				result["error"] = prev + "; " + fmt.Sprint(part["error"])
+			} else {
+				result["error"] = part["error"]
+			}
 		}
 	}
+	// 成功删除的存储限定令牌,供调用方登记 webhook 释放槽位;
+	// handler 写出响应前移除该内部键。
+	result["succeededTokens"] = succeededTokens
 	return result
 }
 
@@ -262,11 +320,14 @@ func runSMSDeleteIndices(indices []string, run func(command string) string, stor
 	}
 	responses := make([]string, 0, len(indices))
 	failedIndices := []string{}
+	succeededIndices := []string{}
 	for _, index := range indices {
 		resp := run(fmt.Sprintf(`AT+CPMS="%s","%s","%s";+CMGD=%s`, storage, storage, storage, index))
 		responses = append(responses, resp)
 		if !atResponseOK(resp) {
 			failedIndices = append(failedIndices, index)
+		} else {
+			succeededIndices = append(succeededIndices, index)
 		}
 	}
 	deleted := len(indices) - len(failedIndices)
@@ -275,6 +336,8 @@ func runSMSDeleteIndices(indices []string, run func(command string) string, stor
 		"response": strings.Join(responses, "\n"),
 		"deleted":  deleted,
 		"total":    len(indices),
+		// 成功删除的索引,供上层登记 webhook 释放槽位(见 markSMSWebhookSlotsFreed)。
+		"succeededIndices": succeededIndices,
 	}
 	if len(failedIndices) > 0 {
 		result["error"] = fmt.Sprintf("部分删除失败: 已删 %d/%d，失败索引(%s): %s", deleted, len(indices), storage, strings.Join(failedIndices, ","))
@@ -320,13 +383,23 @@ func (s *simpleAdminServer) sendSMSBusiness(number string, message string) map[s
 		return map[string]any{"ok": false, "error": "missing number or message", "validation": true}
 	}
 
-	uid := int(time.Now().UnixNano() % 255)
+	// 拼接 uid 用进程内原子递增循环取 1..255:旧实现 UnixNano()%255 完全
+	// 由时间决定且只有 254 个取值,同一目的号码的两条长短信快速连发时
+	// uid 可能相同,固件按 (uid,seq,total) 重组会把两条消息的分片错拼。
+	uid := int(atomic.AddUint32(&smsConcatUIDCounter, 1) % 255)
 	if uid <= 0 {
-		uid = 1
+		uid = 255
 	}
 	segments := splitSMSVendorSegments(message)
 	if len(segments) == 0 {
 		return map[string]any{"ok": false, "error": "empty message", "validation": true}
+	}
+	// 段数硬上限:每段是同步独占全局 AT 锁的独立事务(等提示符 10s + 等
+	// 终结结果 60s),不设上限时超长正文(几十 KB)会切出数百段,把请求
+	// handler 阻塞数十分钟并长期霸占 /dev/smd11,前端早已超时,页面轮询
+	// 与 webhook 轮询全部排队。超限按输入校验失败(400)拒绝。
+	if len(segments) > smsMaxSendSegments {
+		return map[string]any{"ok": false, "error": fmt.Sprintf("短信过长:最多支持 %d 段(约 %d 字符)", smsMaxSendSegments, smsMaxSendSegments*smsVendorSegmentUnits), "validation": true}
 	}
 
 	responses := make([]string, 0, len(segments))
@@ -351,7 +424,14 @@ func (s *simpleAdminServer) sendSMSBusiness(number string, message string) map[s
 			return map[string]any{"ok": false, "error": "发送结果未知，短信可能已发送，请勿重复发送", "segment": i + 1, "result_unknown": true}
 		}
 		if !atResponseOK(resp) {
-			return map[string]any{"ok": false, "error": smsSendErrorKind(resp), "segment": i + 1}
+			kind := smsSendErrorKind(resp)
+			// 运行器报错但已捕获部分输出(如等提示符超时)时,resp 非空、
+			// 又无 ERROR 字样可归类,旧实现丢弃 err 只回 "UNKNOWN":
+			// 用户看不到真实原因(超时/设备路径),无法区分模块忙与固件拒绝。
+			if kind == "UNKNOWN" && err != nil {
+				kind = err.Error()
+			}
+			return map[string]any{"ok": false, "error": kind, "segment": i + 1}
 		}
 	}
 	return map[string]any{"ok": true, "segments": len(segments), "number": number}
@@ -520,7 +600,12 @@ func parseSMSListAT(raw string, storage string) map[string]any {
 			// 非 DELIVER 类型,直接跳过该条目;不能回退做 UCS2 猜测解码,
 			// 否则会把整条 PDU 十六进制解成乱码假短信(发送者显示为 PDU 长度)。
 			// 文本模式的十六进制正文(头部带日期)仍按原有逻辑解码。
-			if date == "" {
+			// 闸门按"纯数字即跳过"判定:标准五字段 PDU 头
+			// `+CMGL: <idx>,<stat>,[<oa>],[<alpha>],<len>` 下 parts[4] 是 PDU
+			// 长度(纯数字),非空判断挡不住——带 OA 的非 DELIVER 条目会产出
+			// date="28"、正文为整条 PDU 十六进制的乱码假短信并被 webhook 推送。
+			// 文本模式日期恒含 "/" 与 ",",不会被误杀;空 date 同样命中跳过。
+			if stripNonDigits(date) == date {
 				continue
 			}
 		}

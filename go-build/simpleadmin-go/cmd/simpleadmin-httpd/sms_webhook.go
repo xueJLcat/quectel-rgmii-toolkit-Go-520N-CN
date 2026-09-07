@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -24,7 +25,25 @@ var (
 	smsWebhookMu          sync.Mutex
 	smsWebhookHighWater   = map[string]int{}
 	smsWebhookInitialized = map[string]bool{}
+	// smsWebhookFreedSlots 记录成功删除的 (存储 → 索引集合):模块会把新
+	// 短信写入被删空的低索引槽位,高水位机制对"索引 ≤ 高水位的新消息"
+	// 无能为力(回绕启发式只在列表最大索引变小时触发),不登记则部分删除后
+	// 复用槽位的新短信永久漏推。槽位后续出现消息时按新到达补发一次并移除
+	// 登记(宁可重复,不可漏报)。受 smsWebhookMu 保护,登记方须持
+	// smsWebhookScanMu 与扫描串行。
+	smsWebhookFreedSlots = map[string]map[int]bool{}
 )
+
+// smsWebhookScanMu 把"拉取短信列表 → 推进高水位"的整个扫描串行化。
+// 拉取发生在 smsWebhookMu 之外(慢操作不占状态锁),页面强制刷新与后台
+// 轮询并发交错时,持较旧快照的一方可能在较新快照推进水位之后才执行
+// notify,旧快照的 currentMax 低于高水位会触发回绕启发式把水位拉低,
+// 造成重复推送(且下一轮扫描会把最新消息再推一次)。页面 list/list_meta
+// (scanSMSListWithWebhookNotify)与后台轮询(smsWebhookPollTick)共用本锁。
+var smsWebhookScanMu sync.Mutex
+
+// smsMaxSendSegments 是单条长短信的段数上限(见 sendSMSBusiness 的说明)。
+const smsMaxSendSegments = 10
 
 // smsWebhookPost 可注入，便于测试替换为记录器，不产生真实网络请求
 var smsWebhookPost = defaultSMSWebhookPost
@@ -242,6 +261,44 @@ func smsWebhookStorage(msg map[string]any) string {
 	return "ME"
 }
 
+// resetSMSWebhookState 在存储被整体清空(delete_all 成功)后重置该存储的
+// webhook 水位:高水位置 -1 且保持已初始化,清空后到达的任何短信(索引 ≥0)
+// 都高于水位、正常推送。不重置时旧高水位会让模块复用低索引的新短信被
+// 回绕启发式吞掉——只有最大索引那条补发,更低索引的永久漏推,违反
+// "宁可重复一次,不可漏报"。只能对清空成功的存储调用:仍有存量短信的
+// 存储被重置会导致下一轮扫描全量重推。
+func resetSMSWebhookState(storages ...string) {
+	smsWebhookMu.Lock()
+	defer smsWebhookMu.Unlock()
+	for _, storage := range storages {
+		smsWebhookHighWater[storage] = -1
+		smsWebhookInitialized[storage] = true
+		// 整体清空后任何索引都高于水位(-1),释放槽位登记已无意义,清除。
+		delete(smsWebhookFreedSlots, storage)
+	}
+}
+
+// markSMSWebhookSlotsFreed 登记成功删除的槽位(令牌形态 "<存储>:<索引>",
+// 与 parseSMSDeleteToken 一致),供下轮扫描把复用该槽位的新短信判为新到达。
+// 只登记确认删除成功的索引:失败的删除槽位仍被旧消息占用,登记会把存量
+// 消息误判为新到达重复推送。调用方必须持有 smsWebhookScanMu(与扫描串行,
+// 防止在途扫描带着删除前的旧快照交错推进状态)。
+func markSMSWebhookSlotsFreed(tokens []string) {
+	smsWebhookMu.Lock()
+	defer smsWebhookMu.Unlock()
+	for _, token := range tokens {
+		storage, index := parseSMSDeleteToken(token)
+		idx, err := strconv.Atoi(index)
+		if err != nil {
+			continue
+		}
+		if smsWebhookFreedSlots[storage] == nil {
+			smsWebhookFreedSlots[storage] = map[int]bool{}
+		}
+		smsWebhookFreedSlots[storage][idx] = true
+	}
+}
+
 // smsWebhookAdvanceLocked 推进单个存储的高水位并返回新到达消息。
 // 调用方必须持有 smsWebhookMu。
 func smsWebhookAdvanceLocked(storage string, messages []map[string]any, scanValid bool) ([]map[string]any, []int) {
@@ -278,10 +335,12 @@ func smsWebhookAdvanceLocked(storage string, messages []map[string]any, scanVali
 	newMessages := []map[string]any{}
 	newIndexes := []int{}
 	if !firstCall {
+		freed := smsWebhookFreedSlots[storage]
 		for _, msg := range messages {
 			indices := toIntSlice(msg["indices"])
 			msgMax := -1
 			isNew := false
+			freedHit := false
 			for _, idx := range indices {
 				if idx > msgMax {
 					msgMax = idx
@@ -289,10 +348,23 @@ func smsWebhookAdvanceLocked(storage string, messages []map[string]any, scanVali
 				if idx > highWater {
 					isNew = true
 				}
+				// 已删除槽位被模块复用存放新短信:索引虽不高于高水位,
+				// 命中登记即按新到达处理(见 smsWebhookFreedSlots)。
+				if freed[idx] {
+					isNew = true
+					freedHit = true
+				}
 			}
 			if isNew && msgMax >= 0 {
 				newMessages = append(newMessages, msg)
 				newIndexes = append(newIndexes, msgMax)
+				if freedHit {
+					// 槽位只补发一次:推送后清除登记,该索引的后续消息
+					// 回到高水位语义。
+					for _, idx := range indices {
+						delete(freed, idx)
+					}
+				}
 			}
 		}
 	}
@@ -367,6 +439,10 @@ func smsWebhookPollTick(s *simpleAdminServer) {
 	if !cfg.Enabled || cfg.URL == "" {
 		return
 	}
+	// 拉取+通知整体与页面扫描串行,防旧快照后推进水位造成回退重推
+	// (见 smsWebhookScanMu)。
+	smsWebhookScanMu.Lock()
+	defer smsWebhookScanMu.Unlock()
 	data, validStorages := smsWebhookPollFetchDual(s)
 	notifyNewSMSByWebhookStorages(smsDataMessages(data), validStorages)
 }

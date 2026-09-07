@@ -46,8 +46,17 @@ var diagResolverDialer = func(ctx context.Context, network, address string) (net
 	return d.DialContext(ctx, network, address)
 }
 
-// diagDomainPattern 校验主机名格式:字母/数字/连字符标签以点连接,允许末尾根点。
-var diagDomainPattern = regexp.MustCompile(`^[A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?(\.[A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?)*\.?$`)
+// diagDomainPattern 校验 DNS 名格式:字母/数字/下划线/连字符标签以点连接,
+// 允许末尾根点。标签首字符放开下划线:_acme-challenge/_dmarc/_sip._tcp 等
+// 下划线前缀记录是 DNS 诊断的高频合法目标(RFC 6335/SRV/DKIM/ACME),
+// DNS 名空间不适用 hostname 规范,旧正则会以 400 拒绝它们。
+var diagDomainPattern = regexp.MustCompile(`^[A-Za-z0-9_]([A-Za-z0-9_-]{0,61}[A-Za-z0-9_])?(\.[A-Za-z0-9_]([A-Za-z0-9_-]{0,61}[A-Za-z0-9_])?)*\.?$`)
+
+// diagSchemePrefixPattern 判定探测目标是否已带 scheme 前缀:scheme 只可能
+// 出现在首个 '/'、'?'、'#' 之前,不能按 Contains("://") 判断——
+// `example.com/check?url=http://a.com` 这类无 scheme 但查询串内嵌 URL 的
+// 目标会被误判为已带 scheme,解析出空 scheme 后被 400 拒绝。
+var diagSchemePrefixPattern = regexp.MustCompile(`^[A-Za-z][A-Za-z0-9+.\-]*://`)
 
 // handleDiagData 处理网络诊断页 /api/diag_data 的各动作。
 //
@@ -103,7 +112,7 @@ func normalizeDiagProbeTarget(target string) (string, error) {
 		return "", errors.New("missing target")
 	}
 	raw := target
-	if !strings.Contains(raw, "://") {
+	if !diagSchemePrefixPattern.MatchString(raw) {
 		raw = "http://" + raw
 	}
 	u, err := url.Parse(raw)

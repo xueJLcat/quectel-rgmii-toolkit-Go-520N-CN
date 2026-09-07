@@ -15,6 +15,14 @@ const (
 	defaultSchedulerRebootTime = "04:00"
 	schedulerCheckInterval     = 30 * time.Second
 	schedulerRebootCommand     = "AT+CFUN=1,1"
+	// schedulerCatchUpMaxAge 是补跑判定可接受的 LastCheck 最大陈旧度。
+	// 设备无电池时钟,开机初期系统时间是错误值(如 1970 年),此时写入的
+	// LastCheck 不代表真实时间轴;NTP 校时把时钟向前步进数年后,若无此
+	// 护栏,陈旧的 LastCheck 会让"补跑"分支误判进程错过了当天设定时刻,
+	// 设备在开机约 1 分钟后无预警重启。合法补跑场景(当天/前一天错过
+	// 设定时刻)的 LastCheck 距 target 不超过 24 小时左右,48 小时窗口
+	// 足够宽松;更陈旧的记录一律按"无历史记录"处理,不补跑。
+	schedulerCatchUpMaxAge = 48 * time.Hour
 )
 
 var schedulerTimeRegexp = regexp.MustCompile(`^([01]\d|2[0-3]):[0-5]\d$`)
@@ -155,7 +163,8 @@ func schedulerRememberCheck(now time.Time) {
 // 持久化于 scheduler.state，进程重启后当日不会重复触发。
 //
 // 触发条件（补跑语义）：当前时间 >= 当天设定时刻 且 今天尚未执行。
-// 其中"已过设定时刻"的补跑额外要求状态文件中的上次检查时刻早于设定时刻，
+// 其中"已过设定时刻"的补跑额外要求状态文件中的上次检查时刻早于设定时刻
+// 且陈旧度不超过 schedulerCatchUpMaxAge(防开机错误时钟污染,见该常量注释)，
 // 以证明进程在设定时刻前已在运行、确实错过了该窗口（含进程当时未运行的情形），
 // 避免无历史记录时（如首次启动即已过时刻）误补跑；当前分钟恰为设定时刻时
 // 直接触发（保留原行为）。时间一律使用设备本地时间。
@@ -195,7 +204,8 @@ func schedulerCheckOnce(s *simpleAdminServer, now time.Time) bool {
 		case now.Format("15:04") == cfg.RebootTime:
 			triggered = true
 		default:
-			if last, err := time.Parse(time.RFC3339, st.LastCheck); err == nil && last.Before(target) {
+			if last, err := time.Parse(time.RFC3339, st.LastCheck); err == nil &&
+				last.Before(target) && last.After(target.Add(-schedulerCatchUpMaxAge)) {
 				triggered = true // 补跑：错过了设定时刻窗口
 			}
 		}

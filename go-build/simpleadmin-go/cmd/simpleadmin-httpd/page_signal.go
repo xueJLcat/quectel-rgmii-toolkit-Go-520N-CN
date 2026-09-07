@@ -24,7 +24,14 @@ var signalAntennaIDs = []struct{ id, label string }{
 
 func (s *simpleAdminServer) handleSignalData(w http.ResponseWriter, r *http.Request) {
 	raw := s.fetchPageAT(atKeySignalDetail, boolQuery(r, "force", false), true)
-	writeJSON(w, http.StatusOK, parseSignalDetailAT(raw))
+	data := parseSignalDetailAT(raw)
+	// 与其余状态端点契约一致:非保护期且完全拿不到数据行才算读取失败,
+	// 标记 error 供前端显示失败态/重试——AT 故障不得静默渲染成
+	// "四根 - 天线的无信号空态"(失败伪装成空结果)。
+	if pending, _ := data["pending"].(bool); !pending && atReadFailed(raw) {
+		data["error"] = "AT 数据读取失败，请检查模块或稍后重试"
+	}
+	writeJSON(w, http.StatusOK, data)
 }
 
 // parseSignalDetailAT 解析信号详情专用命令应答为结构化数据:
@@ -77,7 +84,23 @@ func parseSignalDetailAT(raw string) map[string]any {
 	}
 	data["ok"] = true
 	applySignalAntennas(qrsrpLines, antennas, data)
-	data["carriers"] = parseSignalCarriers(qcaLines)
+	carriers := parseSignalCarriers(qcaLines)
+	data["carriers"] = carriers
+	// QCAINFO 的 SCC PCI 聚合进 cell 摘要(复用仪表盘 " + " 连接口径):
+	// 摘要键列表与前端都为 scc_pci 预留了行,旧实现没把 QCAINFO 数据源
+	// 接进来,该行恒 "-" 被前端隐藏,载波聚合时 SCC PCI 只在 carriers 可见。
+	sccPCIs := []string{}
+	for _, carrier := range carriers {
+		if role, _ := carrier["role"].(string); role != "SCC" {
+			continue
+		}
+		if pci, _ := carrier["pci"].(string); pci != "" && pci != "-" {
+			sccPCIs = append(sccPCIs, pci)
+		}
+	}
+	if len(sccPCIs) > 0 {
+		cell["scc_pci"] = strings.Join(sccPCIs, " + ")
+	}
 	data["cell"] = signalCellSummary(cell)
 	return data
 }
@@ -112,7 +135,6 @@ func parseSignalCarriers(lines []string) []map[string]any {
 func applySignalAntennas(lines []string, antennas []map[string]any, data map[string]any) {
 	var lte, nr [4]string
 	hasLTE, hasNR := false, false
-	rat := ""
 	for _, line := range lines {
 		parts := csvFields(strings.TrimPrefix(line, "+QRSRP:"))
 		if len(parts) < 4 {
@@ -126,10 +148,8 @@ func applySignalAntennas(lines []string, antennas []map[string]any, data map[str
 		switch {
 		case strings.Contains(upper, "LTE"):
 			lte, hasLTE = values, true
-			rat = "LTE"
 		case strings.Contains(upper, "NR5G"):
 			nr, hasNR = values, true
-			rat = "NR5G"
 		default:
 			// 无 RAT 后缀的旧式应答按 LTE 槽位收纳,仅在尚无任何数据时生效。
 			if !hasLTE && !hasNR {
@@ -140,7 +160,15 @@ func applySignalAntennas(lines []string, antennas []map[string]any, data map[str
 	if !hasLTE && !hasNR {
 		return
 	}
-	data["rat"] = rat
+	// 制式在循环后整体判定,不随行序"最后写入者胜":EN-DC 双行并存时制式
+	// 恒为 NR5G(与 percent 取 NR 值的口径一致),固件行序颠倒(NR5G 行在前)
+	// 时旧实现会误标 LTE;无后缀旧式应答按 LTE 收纳后此处同样得到 LTE,
+	// 不再遗留空串。
+	if hasNR {
+		data["rat"] = "NR5G"
+	} else {
+		data["rat"] = "LTE"
+	}
 	for i := range antennas {
 		value, primary := "-", "-"
 		switch {

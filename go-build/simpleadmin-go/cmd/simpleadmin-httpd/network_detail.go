@@ -79,13 +79,15 @@ func updateIfaceRateSample(name string, rx, tx int64, now time.Time) (int64, int
 	prev, ok := ifaceRateLast[name]
 	sample := ifaceSample{rxBytes: rx, txBytes: tx, at: now}
 	if ok {
-		if dt := now.Sub(prev.at); dt >= networkDetailMinSampleInterval {
-			sample.rxRate = clampRate(rx-prev.rxBytes, dt.Seconds())
-			sample.txRate = clampRate(tx-prev.txBytes, dt.Seconds())
-		} else {
-			sample.rxRate = prev.rxRate
-			sample.txRate = prev.txRate
+		dt := now.Sub(prev.at)
+		if dt < networkDetailMinSampleInterval {
+			// 间隔不足:沿用上次速率,且必须保留上次基线(不写回本次采样)。
+			// 旧实现跳过计算时仍前移基线,持续 <500ms 的轮询(监控脚本/
+			// 重试风暴)会让 dt 永远达不到阈值,速率自首次采样后恒为 0。
+			return prev.rxRate, prev.txRate
 		}
+		sample.rxRate = clampRate(rx-prev.rxBytes, dt.Seconds())
+		sample.txRate = clampRate(tx-prev.txBytes, dt.Seconds())
 	}
 	ifaceRateLast[name] = sample
 	return sample.rxRate, sample.txRate
@@ -187,7 +189,10 @@ func findDnsmasqLeasePath() string {
 // parseDnsmasqLeases 解析 dnsmasq 租约文件内容,行格式:
 // `<到期时间戳> <MAC> <IP> <主机名> <客户端标识>`。
 // 跳过:字段不足、时间戳非法、已到期、标识非 MAC 的 IPv6(DUID)行;
-// 主机名 `*` 归一为空串。
+// 主机名 `*` 归一为空串;到期时间戳 0 是 dnsmasq 的无限租约写法
+// (dhcp-host infinite、BOOTP 动态租约、2038 溢出均写 0),按
+// LeaseSeconds=-1(与 ARP 静态设备同一"无限期"展示语义)纳入结果,
+// 不得当作"已到期"丢弃。
 func parseDnsmasqLeases(content string, now time.Time) []lanClient {
 	clients := []lanClient{}
 	for _, raw := range strings.Split(content, "\n") {
@@ -199,9 +204,13 @@ func parseDnsmasqLeases(content string, now time.Time) []lanClient {
 		if err != nil {
 			continue
 		}
-		remaining := expiry - now.Unix()
-		if remaining <= 0 {
-			continue
+		leaseSeconds := int64(-1)
+		if expiry != 0 {
+			remaining := expiry - now.Unix()
+			if remaining <= 0 {
+				continue
+			}
+			leaseSeconds = remaining
 		}
 		mac := strings.ToUpper(fields[1])
 		if !isMACAddress(mac) {
@@ -211,7 +220,7 @@ func parseDnsmasqLeases(content string, now time.Time) []lanClient {
 		if hostname == "*" {
 			hostname = ""
 		}
-		clients = append(clients, lanClient{MAC: mac, IP: fields[2], Hostname: hostname, LeaseSeconds: remaining})
+		clients = append(clients, lanClient{MAC: mac, IP: fields[2], Hostname: hostname, LeaseSeconds: leaseSeconds})
 	}
 	return clients
 }

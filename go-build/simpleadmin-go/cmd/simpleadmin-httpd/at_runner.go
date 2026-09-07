@@ -229,6 +229,10 @@ func nativeATWriteRead(device, payload string, timeout time.Duration, terminalTo
 	echoMarker := atPayloadEchoMarker(payload)
 	logATDebug("write AT payload to %s: %s", device, atPayloadSummary(payload))
 	if err := writeATSessionString(session, payload); err != nil {
+		// 写失败(含写超时被杀)时 payload 可能只写入了一半:模块输入缓冲
+		// 残留无结尾的半截命令,会与下一条命令拼接。置脏让下一笔事务用
+		// 加长 drain 窗口清理,与"未等到终结 token"路径的处理保持一致。
+		markATSessionDirty(session)
 		return "", fmt.Errorf("write failed: %w", err)
 	}
 
@@ -236,6 +240,9 @@ func nativeATWriteRead(device, payload string, timeout time.Duration, terminalTo
 	out, err := readATSessionUntilTokens(session, timeout, echoMarker, terminalTokens...)
 	logATDebug("read AT response done from %s: err=%v output=%s", device, err, outputSummary(out))
 	if err != nil {
+		// 读失败(reader 异常退出)时模块可能仍在流式输出,迟到字节会被
+		// 重启后的 reader 收进缓冲;置脏让下一笔事务加长清理窗口。
+		markATSessionDirty(session)
 		return out, fmt.Errorf("read failed: %w", err)
 	}
 	// Swallow any trailing bytes of this transaction so they cannot leak into
@@ -244,10 +251,13 @@ func nativeATWriteRead(device, payload string, timeout time.Duration, terminalTo
 	if containsAnyToken(out, terminalTokens...) {
 		return out, nil
 	}
-	// 未等到终结 token:模块可能仍在输出本命令的迟到响应。标记通道为脏,
-	// 让下一笔事务写前的 drain 用加长窗口吸干净残留字节,防止脏数据污染
-	// 后续读取造成级联超时。
-	markATSessionDirty(session)
+	// 未等到终结 token:模块可能仍在输出本命令的迟到响应,也可能因用户经
+	// 通用入口执行了提示符类命令(如裸 AT+CMGS/AT+CMGW,不带 payload)而
+	// 滞留在 ">" 输入态——此后所有 AT 命令都会被当作报文体吞掉,全站数据
+	// 瘫痪直至模块重启。补发 ESC(命令态下是无害空操作)兜底恢复输入态,
+	// 并标记通道为脏,让下一笔事务写前的 drain 用加长窗口吸干净残留字节,
+	// 防止脏数据污染后续读取造成级联超时。
+	abortSMSInputMode(session)
 	if strings.TrimSpace(out) != "" {
 		return out, fmt.Errorf("timeout waiting for %s", strings.Join(terminalTokens, "/"))
 	}
@@ -280,7 +290,10 @@ func shouldTryNextATDevice(err error) bool {
 // 自动重试、不换设备,由调用方决定后续处理。
 var errSMSResultUnknown = errors.New("SMS body sent but result unknown (no terminal response)")
 
-func runSMSTransaction(sendCmd, message string) (string, error) {
+// runSMSTransaction 执行一次完整的短信发送事务(等提示符→写正文→等终结
+// 结果)。声明为 var 以便测试注入失败形态(与 executeCachedATCommand、
+// smsDeleteRunForTest 同一约定),运行期行为不变。
+var runSMSTransaction = func(sendCmd, message string) (string, error) {
 	unlock, err := lockGlobalATFile()
 	if err != nil {
 		return "", err
@@ -368,20 +381,32 @@ var sendSMSOnDevice = func(device, sendCmd, message string) (string, error) {
 	_ = writeATSessionString(session, "\x1B")
 	drainATSession(session, 100*time.Millisecond)
 	if err := writeATSessionString(session, sendCmd+"\r"); err != nil {
+		markATSessionDirty(session)
 		return "", fmt.Errorf("write CMGS failed: %w", err)
 	}
-	prompt, err := readATSessionUntilTokens(session, 10*time.Second, "", ">", "ERROR")
+	// 提示符读取必须做回显关联(与普通命令路径同一机制):上一笔超时事务的
+	// 迟到字节若漏过 drain,裸读会把陈旧 ERROR 当本事务结果提前返回,甚至
+	// 在模块已给出 "> " 时误判失败且不发 ESC,模块滞留输入态吞掉后续命令。
+	prompt, err := readATSessionUntilTokens(session, 10*time.Second, atPayloadEchoMarker(sendCmd), ">", "ERROR")
 	if err != nil {
 		abortSMSInputMode(session)
 		return prompt, fmt.Errorf("read SMS prompt failed: %w", err)
 	}
 	if strings.Contains(prompt, "ERROR") {
+		// 无法完全排除"ERROR 是残留行而模块实际已给出 > 提示符"的边界:
+		// 与其他失败分支一致补发 ESC(命令态下无害),防止模块滞留输入态。
+		abortSMSInputMode(session)
 		return prompt, nil
 	}
 	if !strings.Contains(prompt, ">") {
 		abortSMSInputMode(session)
 		return prompt, fmt.Errorf("timeout waiting for SMS prompt")
 	}
+	// 写正文前清空读缓冲:reader 缓冲是快照式的,此刻仍留有命令回显、"> "
+	// 及可能漏过 drain 的陈旧字节;不清空则正文读取开始的瞬间,缓冲里任何
+	// 一行陈旧 OK/ERROR 都会被当成本次发送的终结结果(假成功/假失败)。
+	// 模块在提示符后静默等待输入,真实的发送结果只会在正文写入后到达。
+	drainATSession(session, 100*time.Millisecond)
 	if err := writeATSessionString(session, message+"\x1A"); err != nil {
 		abortSMSInputMode(session)
 		return prompt, fmt.Errorf("write SMS body failed: %w", err)
@@ -550,7 +575,11 @@ func containsATFinalLine(text string, token string) bool {
 		if token == "OK" && upper == "OK" {
 			return true
 		}
-		if token == "ERROR" && (upper == "ERROR" || strings.HasPrefix(upper, "+CME ERROR:") || strings.HasPrefix(upper, "+CMS ERROR:")) {
+		if token == "ERROR" && (upper == "ERROR" || strings.HasPrefix(upper, "+CME ERROR") || strings.HasPrefix(upper, "+CMS ERROR")) {
+			// 错误行前缀不要求冒号,与解析层 hasATTerminalErrorLine 口径一致:
+			// 部分固件输出无冒号变体(如 "+CME ERROR 10"),若运行器不认其为
+			// 终结行,事务会等满超时、置脏并触发重试,而同一文本到了解析层
+			// 又被正确识别为模块错误,两层语义割裂。
 			return true
 		}
 	}

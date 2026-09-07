@@ -77,11 +77,18 @@ func TestMetricsHistoryRingBufferCapsAtCapacity(t *testing.T) {
 	resetMetricsHistoryForTest()
 	defer resetMetricsHistoryForTest()
 
+	// 用真实形态的时间戳(每分钟一条,末条距今 1 分钟)填满缓冲:1970 形态的
+	// 合成时间戳(int64(i))与当前采样点之间是数十年的向前断层,会命中时钟
+	// 向前步进的时间轴重置(见 recordMetricsHistoryFromDashboard),测不到
+	// 本用例要验证的容量滚动语义。
+	now := time.Now()
 	metricsHistory.mu.Lock()
 	for i := 0; i < metricsHistoryCapacity; i++ {
-		metricsHistory.points = append(metricsHistory.points, metricsHistoryPoint{Timestamp: int64(i)})
+		metricsHistory.points = append(metricsHistory.points, metricsHistoryPoint{
+			Timestamp: now.Add(-time.Duration(metricsHistoryCapacity-i) * time.Minute).Unix(),
+		})
 	}
-	metricsHistory.last = time.Now().Add(-2 * time.Minute)
+	metricsHistory.last = now.Add(-2 * time.Minute)
 	metricsHistory.mu.Unlock()
 
 	recordMetricsHistoryFromDashboard(map[string]any{"signalPercentage": 99})

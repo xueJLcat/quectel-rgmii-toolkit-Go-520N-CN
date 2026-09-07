@@ -19,17 +19,20 @@ func setupSMSWebhookTest(t *testing.T) {
 	oldPost := smsWebhookPost
 	oldHighWater := smsWebhookHighWater
 	oldInitialized := smsWebhookInitialized
+	oldFreedSlots := smsWebhookFreedSlots
 	t.Cleanup(func() {
 		stopSMSWebhookPoller()
 		runtimeTTLValueFile = oldTTLFile
 		smsWebhookPost = oldPost
 		smsWebhookHighWater = oldHighWater
 		smsWebhookInitialized = oldInitialized
+		smsWebhookFreedSlots = oldFreedSlots
 	})
 	runtimeTTLValueFile = filepath.Join(t.TempDir(), "ttlvalue")
 	smsWebhookPost = defaultSMSWebhookPost
 	smsWebhookHighWater = map[string]int{}
 	smsWebhookInitialized = map[string]bool{}
+	smsWebhookFreedSlots = map[string]map[int]bool{}
 }
 
 func installSMSWebhookRecorder(t *testing.T) <-chan smsWebhookPostRecord {

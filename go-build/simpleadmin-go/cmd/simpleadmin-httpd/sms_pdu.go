@@ -158,6 +158,7 @@ func decodePDUUserData(firstOctet byte, dcs byte, udl int, userData []byte) (str
 	udhi := firstOctet&0x40 != 0
 	content := userData
 	udhSeptets := 0
+	udhOctets := 0
 	concatRef := ""
 	concatTotal := 0
 	concatSeq := 0
@@ -168,7 +169,13 @@ func decodePDUUserData(firstOctet byte, dcs byte, udl int, userData []byte) (str
 			concatRef, concatTotal, concatSeq = parseSMSConcatUDH(udh)
 			content = userData[udhl+1:]
 			udhSeptets = ((udhl+1)*8 + 6) / 7
+			udhOctets = udhl + 1
 		}
+	}
+	// UDL 计数含 UDH 的全部用户数据八位组:按声明截断 content,畸形/尾部
+	// 带杂质的 PDU 多余字节不参与 ucs2/8bit 解码。
+	if maxContent := udl - udhOctets; maxContent >= 0 && len(content) > maxContent {
+		content = content[:maxContent]
 	}
 	switch smsDCSAlphabet(dcs) {
 	case "ucs2":
@@ -180,7 +187,19 @@ func decodePDUUserData(firstOctet byte, dcs byte, udl int, userData []byte) (str
 			if septets < 0 {
 				septets = 0
 			}
+			// 截断 PDU(AT 应答半截且截断后仍为合法偶数 hex 时头部边界
+			// 检查可通过)里 UDL 声明的 septet 数可能超出实际数据:越界位
+			// 按 0 继续拼字会伪造 '@' 填充,钳制到实际数据可支撑的数量。
+			if avail := len(userData)*8/7 - udhSeptets; septets > avail {
+				septets = avail
+				if septets < 0 {
+					septets = 0
+				}
+			}
 			return decodeGSM7(userData, septets, udhSeptets), concatRef, concatTotal, concatSeq
+		}
+		if avail := len(content) * 8 / 7; septets > avail {
+			septets = avail
 		}
 		return decodeGSM7(content, septets, 0), concatRef, concatTotal, concatSeq
 	case "8bit":
@@ -280,13 +299,11 @@ func decodePDUAddress(digitCount int, toa byte, raw []byte) string {
 func decodePDUSemiOctets(raw []byte, digitCount int) string {
 	var b strings.Builder
 	for _, value := range raw {
-		lo := value & 0x0F
-		hi := (value >> 4) & 0x0F
-		if lo <= 9 {
-			b.WriteByte(byte('0' + lo))
+		if ch := pduSemiOctetChar(value & 0x0F); ch != 0 {
+			b.WriteByte(ch)
 		}
-		if hi <= 9 {
-			b.WriteByte(byte('0' + hi))
+		if ch := pduSemiOctetChar((value >> 4) & 0x0F); ch != 0 {
+			b.WriteByte(ch)
 		}
 	}
 	out := b.String()
@@ -294,6 +311,29 @@ func decodePDUSemiOctets(raw []byte, digitCount int) string {
 		out = out[:digitCount]
 	}
 	return out
+}
+
+// pduSemiOctetChar 按 TS 23.040 §9.1.2.5 映射地址半八度:0-9 为数字,
+// 10='*'、11='#'、12='a'、13='b'、14='c',15=F 填充符(返回 0 丢弃)。
+// 旧实现把 10-14 与填充符同等静默丢弃,*123# 类业务号码会缺字符,
+// 且字符串变短后 digitCount 截断保护错位。
+func pduSemiOctetChar(v byte) byte {
+	switch {
+	case v <= 9:
+		return '0' + v
+	case v == 10:
+		return '*'
+	case v == 11:
+		return '#'
+	case v == 12:
+		return 'a'
+	case v == 13:
+		return 'b'
+	case v == 14:
+		return 'c'
+	default:
+		return 0
+	}
 }
 
 func decodePDUTimestamp(data []byte) string {

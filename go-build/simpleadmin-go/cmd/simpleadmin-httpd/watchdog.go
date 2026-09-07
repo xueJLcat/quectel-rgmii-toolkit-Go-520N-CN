@@ -35,7 +35,7 @@ const (
 )
 
 // dialTargetTimeout 是单个探测目标的 TCP 拨号超时;看门狗、总览连通性探测
-// 与 /api/get_ping 共用(dialAnyTarget 逐目标串行拨号)。
+// 与 /api/get_ping 共用(dialAnyTarget 对各目标并行拨号,任一成功即返回)。
 const dialTargetTimeout = 1500 * time.Millisecond
 
 // watchdogDefaultTargets 内置探测目标:公共 DNS 的 53 端口,任一拨号成功即视为在线。
@@ -81,14 +81,25 @@ var watchdogPollWait = func(d time.Duration, stop <-chan struct{}) bool {
 	}
 }
 
-// syncWatchdogPoller 按配置同步轮询器运行状态:启用时启动(幂等),
-// 禁用时停止(幂等)并复位失败计数。服务启动时与保存配置后调用。
+// syncWatchdogPoller 按配置同步轮询器运行状态:启用时重启循环(先停后启,
+// 幂等),禁用时停止(幂等)并复位失败计数。服务启动时与保存配置后调用。
+// 启用路径必须重启而非仅幂等启动:正在等待中的循环按开始等待时取的旧间隔
+// 睡眠,缩短检测间隔后若不重启,新间隔要等旧间隔(最长 30 分钟)睡满才生效,
+// 与保存接口"立即生效"的响应语义相悖。
+// 配置读取与启停决定必须在同一临界区内完成(与 syncTimeSyncPoller 对齐):
+// 锁外读取再锁外启停时,并发 set_watchdog 交错(启用请求读到 enabled →
+// 禁用请求完成 stop → 启用请求 start → 禁用请求的 stop 才执行)会留下
+// "配置已启用但轮询器停止"的残留状态——看门狗静默失效,断网不再自愈,
+// 直到下次保存配置或进程重启。watchdogTick 不取本锁,无死锁风险。
 func syncWatchdogPoller(s *simpleAdminServer) {
+	watchdogPollerMu.Lock()
+	defer watchdogPollerMu.Unlock()
 	if readWatchdogConfig().Enabled {
-		startWatchdogPoller(s)
+		stopWatchdogPollerLocked()
+		startWatchdogPollerLocked(s)
 		return
 	}
-	stopWatchdogPoller()
+	stopWatchdogPollerLocked()
 	resetWatchdogFailureState()
 }
 
@@ -111,6 +122,11 @@ func resetWatchdogFailureState() {
 func startWatchdogPoller(s *simpleAdminServer) {
 	watchdogPollerMu.Lock()
 	defer watchdogPollerMu.Unlock()
+	startWatchdogPollerLocked(s)
+}
+
+// startWatchdogPollerLocked 启动轮询循环,调用方必须持有 watchdogPollerMu。
+func startWatchdogPollerLocked(s *simpleAdminServer) {
 	if watchdogPollerStop != nil {
 		return
 	}
@@ -127,6 +143,11 @@ func startWatchdogPoller(s *simpleAdminServer) {
 func stopWatchdogPoller() {
 	watchdogPollerMu.Lock()
 	defer watchdogPollerMu.Unlock()
+	stopWatchdogPollerLocked()
+}
+
+// stopWatchdogPollerLocked 停止轮询循环,调用方必须持有 watchdogPollerMu。
+func stopWatchdogPollerLocked() {
 	if watchdogPollerStop == nil {
 		return
 	}
@@ -304,9 +325,10 @@ func watchdogProbeTargets(cfg watchdogConfig) []string {
 	return cfg.Targets
 }
 
-// watchdogProbeBudget 计算一次联网探测的总预算:拨号按目标串行进行、
-// 每目标独立超时 dialTargetTimeout,总预算 = 目标数×单目标超时 + 余量,
-// 保证排在后面的目标不会因预算耗尽而失去完整探测机会。
+// watchdogProbeBudget 计算一次联网探测的总预算:dialAnyTarget 已改为并行
+// 拨号(总耗时不超过单目标超时),但预算仍按保守上界"目标数×单目标超时 +
+// 余量"计算,兼容探测实现未来回退为串行或个别目标拨号退化时的完整覆盖,
+// 保证任何目标都不会因预算耗尽而失去探测机会。
 func watchdogProbeBudget(targetCount int) time.Duration {
 	if targetCount < 1 {
 		targetCount = 1
@@ -338,9 +360,9 @@ func watchdogTick(s *simpleAdminServer) {
 		check = func(ctx context.Context, targets []string) bool { return dialAnyTarget(ctx, targets) }
 	}
 	targets := watchdogProbeTargets(cfg)
-	// 探测预算必须覆盖全部目标的串行拨号:每个目标 1.5s 独立超时,
-	// 固定 5s 预算在 4 个自定义目标时最坏需 6s,末尾目标只剩零点几秒,
-	// 前几个目标不可达时会把本可证明在线的目标掐死、误判离线。
+	// 探测预算必须覆盖全部目标:每个目标 1.5s 独立超时,预算按目标数放大
+	// (见 watchdogProbeBudget),前几个目标不可达时不会把本可证明在线的
+	// 目标掐死、误判离线。
 	ctx, cancel := context.WithTimeout(context.Background(), watchdogProbeBudget(len(targets)))
 	online := check(ctx, targets)
 	cancel()
@@ -376,27 +398,46 @@ func watchdogTick(s *simpleAdminServer) {
 	watchdogState.consecutiveFailures = 0
 	watchdogState.mu.Unlock()
 
-	actionType := watchdogRunAction(s, cfg, lastActionType)
+	actionType, actionOK := watchdogRunAction(s, cfg, lastActionType)
 
 	watchdogState.mu.Lock()
-	watchdogState.lastActionType = actionType
+	if actionOK {
+		watchdogState.lastActionType = actionType
+	} else {
+		// 动作被模块明确拒绝(应答含终结错误行,重启未发生):与调度器
+		// "先执行后判定,失败不记账"的语义对齐——回滚冷却记录并恢复失败
+		// 计数,下一轮 tick 立即重试自愈,避免一次被拒绝的动作白白占用
+		// 整个"阈值×间隔+冷却"周期(默认约 45 分钟)推迟恢复。
+		log.Printf("看门狗: 自愈动作被模块明确拒绝,回滚冷却记录,下一轮重试")
+		watchdogState.lastActionTime = time.Time{}
+		watchdogState.consecutiveFailures = cfg.FailThreshold
+	}
 	watchdogState.mu.Unlock()
 }
 
-// watchdogRunAction 按动作策略执行自愈动作,返回实际执行的动作类型。
+// watchdogRunAction 按动作策略执行自愈动作,返回实际执行的动作类型与是否
+// 未被模块明确拒绝。判定口径与调度器重启一致(atResponseRebootOK):模块
+// "先重启、后应答",超时无应答是重启常态,视为成功;只有应答出现明确终结
+// 错误行(ERROR/+CME ERROR/+CMS ERROR)才能断定动作未发生,返回 false
+// 由调用方回滚冷却记录、允许下一轮重试。
 // reboot 策略:直接重启模块;
 // escalate 策略:上次动作不是无线电重注册时先尝试重注册(轻量恢复),
 // 上次重注册后仍未恢复、或本次重注册未被接受时升级为重启模块。
-func watchdogRunAction(s *simpleAdminServer, cfg watchdogConfig, lastActionType string) string {
+func watchdogRunAction(s *simpleAdminServer, cfg watchdogConfig, lastActionType string) (string, bool) {
 	rebootAction := watchdogRebootAction
 	if rebootAction == nil {
 		rebootAction = defaultWatchdogRebootAction
 	}
-	runReboot := func(reason string) string {
+	runReboot := func(reason string) (string, bool) {
 		log.Printf("看门狗: %s,执行自愈动作 %s", reason, watchdogRebootCommand)
 		resp := rebootAction(s)
-		log.Printf("看门狗: 自愈动作已执行,响应: %s", outputSummary(resp))
-		return watchdogActionTypeReboot
+		ok := atResponseRebootOK(resp)
+		if ok {
+			log.Printf("看门狗: 自愈动作已执行,响应: %s", outputSummary(resp))
+		} else {
+			log.Printf("看门狗: 自愈动作被模块明确拒绝,响应: %s", outputSummary(resp))
+		}
+		return watchdogActionTypeReboot, ok
 	}
 
 	if cfg.ActionPolicy != watchdogPolicyEscalate {
@@ -417,7 +458,7 @@ func watchdogRunAction(s *simpleAdminServer, cfg watchdogConfig, lastActionType 
 		return runReboot(fmt.Sprintf("无线电重注册未被接受(%s),升级为重启模块", outputSummary(resp)))
 	}
 	log.Printf("看门狗: 无线电重注册已执行,响应: %s", outputSummary(resp))
-	return watchdogActionTypeRadio
+	return watchdogActionTypeRadio, true
 }
 
 // currentWatchdogStatus 返回看门狗当前配置与运行状态,供 API 使用;

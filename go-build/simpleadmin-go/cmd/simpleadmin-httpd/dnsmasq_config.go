@@ -9,7 +9,18 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 )
+
+// dnsUpstreamMu 保护上游 DNS"应用配置→持久化状态"的整体事务互斥。
+// 页面保存处理器(dns_upstream_set)与开机自愈(reconcileDNSUpstreamAtStartup)
+// 都必须在持锁状态下完成各自的完整事务:保存侧是"applyDNSUpstreamLocked→
+// writeDNSUpstreamState",自愈侧是"readDNSUpstreamState→复验→一致性判断→
+// applyDNSUpstreamLocked"。锁只盖住 apply 时,并发保存交错(A-apply→B-apply→
+// B-write→A-write)会让状态文件与实际生效配置背离,下次开机自愈再按陈旧
+// 状态静默回滚用户最后一次保存——正是保存路径注释自己声明要避免的后果。
+// 声明在平台无关文件:处理器(跨平台)与原生实现(Linux)共用同一把锁。
+var dnsUpstreamMu sync.Mutex
 
 const (
 	defaultDNSUpstreamStateFile = "/usrdata/simpleadmin/dns_upstream.conf"

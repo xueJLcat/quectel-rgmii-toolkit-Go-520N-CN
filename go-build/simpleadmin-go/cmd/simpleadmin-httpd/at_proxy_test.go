@@ -185,6 +185,9 @@ func TestATProxyHandleConnProtocolErrors(t *testing.T) {
 		{"payload 超长", `{"command":"ATI","payload":"` + longPayload + `"}`, "payload 超长"},
 		// ESC 会让模块提前退出输入态,必须在执行前拦截(\u001b = ESC)。
 		{"payload 含 ESC", `{"command":"ATI","payload":"abc\u001Bdef"}`, "不允许包含 ESC"},
+		// Ctrl-Z 是报文结束符,由服务端自动补发;内嵌 Ctrl-Z 会截断正文
+		// 且其后字节被模块当作新 AT 命令执行(\u001a = Ctrl-Z)。
+		{"payload 含 Ctrl-Z", `{"command":"ATI","payload":"abc\u001Adef"}`, "不允许包含 Ctrl-Z"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -290,11 +293,12 @@ func TestATProxyHandleConnExecAndTimeout(t *testing.T) {
 		},
 		{
 			// payload 原样透传给 executor(交互事务报文体不做清理,
-			// 换行经 JSON 转义还原后保留)。
+			// 换行经 JSON 转义还原后保留;Ctrl-Z/ESC 属协议错误,见
+			// TestATProxyHandleConnProtocolErrors)。
 			name:          "payload 原样透传给 executor",
-			request:       atProxyRequest{Command: `AT+CMGS="+10086"`, Payload: "hello\x1Aworld", TimeoutMS: 1000},
+			request:       atProxyRequest{Command: `AT+CMGS="+10086"`, Payload: "hello\r\nworld", TimeoutMS: 1000},
 			wantCommand:   `AT+CMGS="+10086"`,
-			wantPayload:   "hello\x1Aworld",
+			wantPayload:   "hello\r\nworld",
 			wantTimeoutMS: 1000,
 		},
 	}

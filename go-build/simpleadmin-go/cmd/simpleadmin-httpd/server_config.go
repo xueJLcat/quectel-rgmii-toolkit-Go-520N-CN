@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -74,6 +75,13 @@ func loadAuthConfig(path string) (authConfig, error) {
 		if len(parts) != 2 || parts[0] == "" {
 			return authConfig{}, fmt.Errorf("认证文件格式错误: %s", path)
 		}
+		// 空密码等价于零口令认证(登录侧 constantTimeEqual("","") 恒真):
+		// 手工写出的 "admin:" 或纯空白密码行(整行 TrimSpace 后即此形态)
+		// 必须判为不可解析,由 ensureAuthFile 走损坏自愈(备份+重置默认
+		// 凭据+告警),而不是静默放行任何人以空密码登录。
+		if parts[1] == "" {
+			return authConfig{}, fmt.Errorf("认证文件密码为空: %s", path)
+		}
 		return authConfig{Username: parts[0], Password: parts[1]}, nil
 	}
 	return authConfig{}, fmt.Errorf("认证文件为空: %s", path)
@@ -123,6 +131,12 @@ func validateNewPassword(password string) error {
 	}
 	if strings.ContainsAny(password, "\r\n") {
 		return errors.New("new password must not contain line breaks")
+	}
+	// 读写必须对称:loadAuthConfig 对整行 TrimSpace,带首尾空白的密码写入
+	// 后读回即被裁掉——用户设置的 "abc " 静默变异为 "abc",按自己设的
+	// 密码登录恒 401 还会撞上失败锁定;纯空白密码则退化为空密码。
+	if strings.TrimSpace(password) != password {
+		return errors.New("new password must not have leading or trailing whitespace")
 	}
 	if len(password) > 128 {
 		return errors.New("new password is too long")
@@ -333,6 +347,18 @@ func (s *simpleAdminServer) handleSetPassword(w http.ResponseWriter, r *http.Req
 		return
 	}
 
+	// 当前密码校验复用登录限流:此处曾是同口令爆破的旁路——登录侧 5 次
+	// 即锁定,而被窃会话(HTTP-only 部署下 Cookie 明文过 LAN,本模块
+	// destroyOtherSessions 注释自认的威胁模型)可在这里无限速猜当前密码,
+	// 命中即改密+吊销其余会话完成账户接管,登录限流的防护价值被清零。
+	remoteIP := loginRemoteIP(r)
+	if remaining := s.loginLockedRemaining(remoteIP); remaining > 0 {
+		retryAfter := int((remaining + time.Second - 1) / time.Second)
+		w.Header().Set("Retry-After", strconv.Itoa(retryAfter))
+		writeJSON(w, http.StatusTooManyRequests, map[string]any{"ok": false, "error": "too many failed attempts", "retry_after": retryAfter})
+		return
+	}
+
 	auth, err := loadAuthConfig(s.cfg.authFile)
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "auth config error"})
@@ -353,9 +379,12 @@ func (s *simpleAdminServer) handleSetPassword(w http.ResponseWriter, r *http.Req
 	}
 
 	if !constantTimeEqual(currentPassword, auth.Password) {
+		s.recordLoginFailure(remoteIP)
 		writeJSON(w, http.StatusForbidden, map[string]string{"error": "current password incorrect"})
 		return
 	}
+	// 当前密码验证通过即证明口令知识,与登录成功同口径清零失败计数。
+	s.resetLoginAttempts(remoteIP)
 	if confirmPassword != "" && newPassword != confirmPassword {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "password confirmation mismatch"})
 		return
@@ -375,6 +404,11 @@ func (s *simpleAdminServer) handleSetPassword(w http.ResponseWriter, r *http.Req
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "auth config error"})
 		return
 	}
+
+	// 改密成功即吊销其余全部会话:内存令牌不因密码变更自动失效,不吊销则
+	// 被窃令牌在改密后仍可持续使用(每请求滑动续期,永不过期),管理员
+	// 改密止损形同虚设。当前会话保留,操作端无需重新登录。
+	s.destroyOtherSessions(r)
 
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
 }

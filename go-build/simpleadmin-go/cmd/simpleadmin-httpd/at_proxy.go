@@ -98,6 +98,10 @@ func startATProxy(sockPath string, mock bool) (net.Listener, error) {
 		return atProxyExecute(command, payload, timeoutMS, mock)
 	}
 	go func() {
+		// 临时错误(EMFILE fd 耗尽等)按 5ms→1s 指数退避,与
+		// net/http.Server.Serve 同款处理:不退避时 Accept 失败会立即返回,
+		// 循环变成 100% CPU 热自旋并刷爆日志。
+		var tempDelay time.Duration
 		for {
 			conn, err := listener.Accept()
 			if err != nil {
@@ -105,9 +109,24 @@ func startATProxy(sockPath string, mock bool) (net.Listener, error) {
 				if errors.Is(err, net.ErrClosed) {
 					return
 				}
+				var netErr net.Error
+				if errors.As(err, &netErr) && netErr.Temporary() {
+					if tempDelay == 0 {
+						tempDelay = 5 * time.Millisecond
+					} else {
+						tempDelay *= 2
+					}
+					if tempDelay > time.Second {
+						tempDelay = time.Second
+					}
+					log.Printf("AT 代理 accept 临时错误: %v,%s 后重试", err, tempDelay)
+					time.Sleep(tempDelay)
+					continue
+				}
 				log.Printf("AT 代理 accept 失败: %v", err)
 				continue
 			}
+			tempDelay = 0
 			go handleATProxyConn(conn, exec)
 		}
 	}()
@@ -174,6 +193,13 @@ func handleATProxyConn(conn net.Conn, exec atProxyExecutor) {
 			writeATProxyError(conn, "protocol", "payload 不允许包含 ESC(0x1B)")
 			return
 		}
+		// Ctrl-Z 是报文结束符,由服务端在报文体末尾自动补发(见 AT_PROXY.md);
+		// 内嵌的 Ctrl-Z 会让模块提前结束输入态、截断正文,其后字节在命令态
+		// 被当作新的 AT 命令执行,破坏事务边界,与 ESC 同规格拦截。
+		if strings.Contains(payload, "\x1A") {
+			writeATProxyError(conn, "protocol", "payload 不允许包含 Ctrl-Z(0x1A),结束符由服务端自动补发")
+			return
+		}
 	}
 
 	timeout := req.TimeoutMS
@@ -183,7 +209,13 @@ func handleATProxyConn(conn net.Conn, exec atProxyExecutor) {
 		return
 	case timeout == 0:
 		// 未指定超时:按命令类型自动取值,与服务端其余执行路径策略一致。
+		// 自动值同样必须封顶:组合命令按子命令累加预算(每段 QSCAN 计 180s,
+		// 4096 字节可拼出数百段),不封顶则一条请求可把全局 AT 锁占住数小时,
+		// 期间所有 AT 功能集体失败(违反 AT_PROXY.md 的 180s 上限约定)。
 		timeout = atCommandTimeoutMS(command)
+		if timeout > atProxyMaxTimeoutMS {
+			timeout = atProxyMaxTimeoutMS
+		}
 	case timeout > atProxyMaxTimeoutMS:
 		// 截断为上限,防止客户端传入无限超时把连接永久挂起。
 		timeout = atProxyMaxTimeoutMS

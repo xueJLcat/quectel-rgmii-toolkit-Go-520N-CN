@@ -32,8 +32,10 @@ func TestATCommandTimeoutUsesLongWaitForDisableIPPassthrough(t *testing.T) {
 	if got := atCommandTimeoutMS(`AT+QMAP="MPDN_RULE",0`); got != 10000 {
 		t.Fatalf("atCommandTimeoutMS(disable passthrough) = %d, want 10000", got)
 	}
-	if got := atCacheWaitTimeout(`AT+QMAP="MPDN_RULE",0`); got != 12*time.Second {
-		t.Fatalf("atCacheWaitTimeout(disable passthrough) = %s, want 12s", got)
+	// 动作命令等待预算 = 自身单次预算(10s) + 排队余量(45s,覆盖至多一条
+	// 在执行中的长读命令) + 2s 见 atCacheActionQueueAllowanceMS 注释。
+	if got := atCacheWaitTimeout(`AT+QMAP="MPDN_RULE",0`); got != 57*time.Second {
+		t.Fatalf("atCacheWaitTimeout(disable passthrough) = %s, want 57s", got)
 	}
 }
 
@@ -1175,8 +1177,10 @@ func TestMockDashboardDefaultPayloadMatchesRealCPE(t *testing.T) {
 	if !strings.Contains(stringValue(data["cellID"]), "24211A484") {
 		t.Fatalf("cellID = %q, want contain 24211A484", data["cellID"])
 	}
-	if data["nr_rx_bytes"] != int64(62817184) || data["nr_tx_bytes"] != int64(45605113) {
-		t.Fatalf("nr counters = (%v, %v), want (62817184, 45605113)", data["nr_rx_bytes"], data["nr_tx_bytes"])
+	// mock 载荷 +QGDNRCNT: 62817184,45605113 按手册 §9.7 字段序
+	// <bytes_sent>,<bytes_recv> 解读:tx=62817184、rx=45605113。
+	if data["nr_rx_bytes"] != int64(45605113) || data["nr_tx_bytes"] != int64(62817184) {
+		t.Fatalf("nr counters = (%v, %v), want (45605113, 62817184)", data["nr_rx_bytes"], data["nr_tx_bytes"])
 	}
 	if percentFromAny(data["signalPercentage"]) <= 0 {
 		t.Fatalf("signalPercentage = %v, want > 0", data["signalPercentage"])

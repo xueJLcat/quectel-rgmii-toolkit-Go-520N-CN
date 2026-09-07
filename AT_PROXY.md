@@ -41,7 +41,7 @@ ssh root@192.168.5.1 "/usrdata/simpleadmin/simpleadmin-httpd at-client ATI"
 | 参数 | 缺省 | 说明 |
 |---|---|---|
 | `--sock <路径>` | `/usrdata/simpleadmin/at_proxy.sock` | AT 代理 Unix Socket 路径,需与主进程 `-at-proxy-sock` 一致 |
-| `--timeout-ms <毫秒>` | `0` | AT 执行超时。`0` = 服务端按命令类型自动:普通命令约 1 秒,扫网类 120 秒,MPDN_RULE 查询 10 秒;上限 `180000`(超出截断为上限;负数按请求错误处理,退出码 2)。**交互事务模式下忽略**(事务内含固定预算) |
+| `--timeout-ms <毫秒>` | `0` | AT 执行超时。`0` = 服务端按命令类型自动:普通命令约 1 秒,扫网类 180 秒,MPDN_RULE 查询 10 秒;上限 `180000`(超出截断为上限;负数按请求错误处理,退出码 2)。**交互事务模式下忽略**(事务内含固定预算) |
 | `--payload <报文体>` | 空 | 交互事务报文体:服务端等模块 `> ` 提示符出现后发送,并自动在末尾补 Ctrl-Z(`0x1A`)。用于 `AT+CMGS`(发短信)、`AT+CMGW`(存短信)等"提示符 + 报文"形态的命令 |
 | `<AT 命令...>` | 必填 | 位置参数拼接为命令体;命令为空按用法错误处理,退出码 2 |
 
@@ -128,7 +128,7 @@ stderr 输出 `连接 AT 代理失败: <socket 连接错误>`;退出码 `2` → 
 
 - `payload` 非空才启用交互事务;为空按普通命令执行。
 - 报文体末尾的 Ctrl-Z 由服务端**自动补**,调用方不要自带。
-- `payload` ≤ `4096` 字节;不允许包含 ESC(`0x1B`,会令模块提前退出输入态),违反按请求错误处理(退出码 2)。
+- `payload` ≤ `4096` 字节;不允许包含 ESC(`0x1B`,会令模块提前退出输入态)与 Ctrl-Z(`0x1A`,报文结束符由服务端自动补,内嵌会截断正文且其后字节被模块当作新命令执行),违反按请求错误处理(退出码 2)。
 - `payload` 可含换行(JSON 以 `\n` 转义,不影响单行分帧);其余内容原样发送。
 - 事务超时固定:等提示符 10 秒、等终结 60 秒;`--timeout-ms` 在该模式下被忽略。
 - 与全局锁串行:事务期间其他 AT 请求(界面/缓存/代理)排队等待。
@@ -162,7 +162,7 @@ ssh root@192.168.5.1 "/usrdata/simpleadmin/simpleadmin-httpd at-client --payload
 | 现象 | 退出码 | 原因 | 处置 |
 |---|---|---|---|
 | stderr `连接 AT 代理失败: ...` | 2 | 服务未运行,或 socket 路径不符 | 确认 `systemctl status simpleadmin-httpd`;核对主进程 `-at-proxy-sock` 与客户端 `--sock` 一致 |
-| stderr `请求错误: ...` | 2 | 协议错误:命令为空、命令超 4096 字节、`timeout_ms` 为负、请求 JSON 非法、`payload` 超 4096 字节、`payload` 含 ESC | 修正请求参数 |
+| stderr `请求错误: ...` | 2 | 协议错误:命令为空、命令超 4096 字节、`timeout_ms` 为负、请求 JSON 非法、`payload` 超 4096 字节、`payload` 含 ESC/Ctrl-Z | 修正请求参数 |
 | stderr `AT 执行失败: ...` | 1 | 代理报 exec 错(含交互事务等提示符超时、写报文体失败) | 重试或检查模组状态 |
 | transcript 以 `ERROR`/`+CME ERROR` 收尾(已原样输出到 stdout) | 1 | 模组拒绝该命令 | 检查命令语法、SIM 与注册状态 |
 | 交互事务 transcript 以 `+CMS ERROR: <代码>` 收尾 | 1 | 短信发送被网络/模块拒绝 | 按 3GPP 27.005 附录查代码含义(如 500=未知错误、304=无效 PDU 参数) |
@@ -171,7 +171,7 @@ ssh root@192.168.5.1 "/usrdata/simpleadmin/simpleadmin-httpd at-client --payload
 
 - 单条命令 ≤ `4096` 字节;`payload` ≤ `4096` 字节;单请求 ≤ `64KB`。
 - 命令中的 CR/LF 会被剥离;`payload` 原样保留(换行经 JSON 转义)。
-- `payload` 不允许包含 ESC(`0x1B`);末尾 Ctrl-Z(`0x1A`)由服务端自动补。
+- `payload` 不允许包含 ESC(`0x1B`)与内嵌 Ctrl-Z(`0x1A`);末尾 Ctrl-Z 由服务端自动补。
 - 交互事务超时固定(提示符 10 秒、终结 60 秒),`--timeout-ms` 在该模式下忽略。
 - socket 权限 `0666`:本地任意用户可连,信任边界 = 本机。
 - 串行执行:与界面/缓存共享同一把全局锁,无并发加速;交互事务期间其他请求排队。
@@ -214,8 +214,8 @@ ssh root@192.168.5.1 "/usrdata/simpleadmin/simpleadmin-httpd at-client --payload
 | `protocol` | 请求格式/连接层错误:JSON 非法、空行、命令为空、命令超 4096 字节、`timeout_ms` 为负、请求超 64KB |
 | `exec` | AT 执行失败 |
 
-`timeout_ms` 语义:`0` = 服务端按命令类型自动;负数 = protocol 错误;大于 `180000` 截断为 `180000`。
-`payload` 语义:可选;非空 = 交互事务(等 `> ` 提示符后发送,服务端自动补 Ctrl-Z);≤4096 字节;含 ESC 为 protocol 错误。
+`timeout_ms` 语义:`0` = 服务端按命令类型自动(组合命令按子命令累加,自动值同样封顶 `180000`);负数 = protocol 错误;大于 `180000` 截断为 `180000`。
+`payload` 语义:可选;非空 = 交互事务(等 `> ` 提示符后发送,服务端自动补 Ctrl-Z);≤4096 字节;含 ESC 或内嵌 Ctrl-Z 为 protocol 错误。
 
 客户端步骤:
 

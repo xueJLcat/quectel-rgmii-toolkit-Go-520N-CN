@@ -239,8 +239,9 @@ num   pkts bytes target     prot opt in     out     source               destina
 	}
 
 	output := chains[2]
-	if output.Pkts != 100*1024 || output.Bytes != 5*1024*1024 {
-		t.Fatalf("OUTPUT 链头计数 = %d/%d, want %d/%d", output.Pkts, output.Bytes, 100*1024, 5*1024*1024)
+	// iptables 的 K/M/G 后缀是 1000 进制(xtables_print_num),非 1024。
+	if output.Pkts != 100*1000 || output.Bytes != 5*1000*1000 {
+		t.Fatalf("OUTPUT 链头计数 = %d/%d, want %d/%d", output.Pkts, output.Bytes, 100*1000, 5*1000*1000)
 	}
 
 	fw := chains[3]
@@ -248,13 +249,13 @@ num   pkts bytes target     prot opt in     out     source               destina
 		t.Fatalf("%s 链 = %+v, want 3 条规则", firewallChainName, fw)
 	}
 	first := fw.Rules[0]
-	if first.Num != 1 || first.Pkts != 100*1024 || first.Bytes != 5*1024*1024 || first.Target != "ACCEPT" || first.Extra != "tcp dpt:8080" {
+	if first.Num != 1 || first.Pkts != 100*1000 || first.Bytes != 5*1000*1000 || first.Target != "ACCEPT" || first.Extra != "tcp dpt:8080" {
 		t.Fatalf("放行规则条目 = %+v, want K/M 计数与 Extra tcp dpt:8080", first)
 	}
 	if fw.Rules[1].In != "bridge0" {
 		t.Fatalf("阻止规则接口 = %q, want bridge0", fw.Rules[1].In)
 	}
-	if fw.Rules[2].Pkts != int64(2)*1024*1024*1024 || fw.Rules[2].Target != "DROP" {
+	if fw.Rules[2].Pkts != int64(2)*1000*1000*1000 || fw.Rules[2].Target != "DROP" {
 		t.Fatalf("DROP 规则条目 = %+v, want 2G 计数", fw.Rules[2])
 	}
 }

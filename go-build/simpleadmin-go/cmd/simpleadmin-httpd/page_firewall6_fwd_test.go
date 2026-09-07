@@ -191,7 +191,8 @@ func TestFirewall6StatusParsesIP6TablesDump(t *testing.T) {
 	}
 
 	output, _ := chains[2].(map[string]any)
-	if output["pkts"] != float64(100*1024) || output["bytes"] != float64(5*1024*1024) {
+	// iptables 的 K/M/G 后缀是 1000 进制(xtables_print_num),非 1024。
+	if output["pkts"] != float64(100*1000) || output["bytes"] != float64(5*1000*1000) {
 		t.Fatalf("OUTPUT 链头 K/M 计数 = %v/%v", output["pkts"], output["bytes"])
 	}
 
@@ -201,11 +202,11 @@ func TestFirewall6StatusParsesIP6TablesDump(t *testing.T) {
 		t.Fatalf("%s 链 = %v, want 无 policy 2 条规则", firewallChainName, fw)
 	}
 	first, _ := fwRules[0].(map[string]any)
-	if first["pkts"] != float64(100*1024) || first["bytes"] != float64(5*1024*1024) || first["extra"] != "tcp dpt:8080" {
+	if first["pkts"] != float64(100*1000) || first["bytes"] != float64(5*1000*1000) || first["extra"] != "tcp dpt:8080" {
 		t.Fatalf("K/M 计数规则 = %v", first)
 	}
 	second, _ := fwRules[1].(map[string]any)
-	if second["pkts"] != float64(2*1024*1024*1024) || second["bytes"] != float64(0) || second["target"] != "DROP" {
+	if second["pkts"] != float64(2*1000*1000*1000) || second["bytes"] != float64(0) || second["target"] != "DROP" {
 		t.Fatalf("G 计数规则 = %v", second)
 	}
 }

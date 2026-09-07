@@ -49,7 +49,14 @@ type atCacheEntry struct {
 	// 后整条淘汰。
 	lastRequested time.Time
 	running       bool
-	waiters       []chan struct{}
+	// pendingForce 记录条目执行期间到达的并发动作命令请求数。动作命令的
+	// 契约是"不缓存,每次执行"(见 at_cache_policy.go):并发同命令请求若
+	// 静默合并进在途执行,第二次动作根本不下发却报成功(如双击删除短信,
+	// 模块只删一次,两个请求都拿到第一次的 OK)。当前执行完成后按计数补跑,
+	// 补跑完成前 waiters 不唤醒。读命令不计数:并发读合并进在途执行拿到的
+	// 就是刚产出的新鲜数据,去重是收益不是缺陷。
+	pendingForce int
+	waiters      []chan struct{}
 }
 
 type atCommandCacheManager struct {
@@ -59,6 +66,12 @@ type atCommandCacheManager struct {
 	started  bool
 	mockMode bool
 	readyAt  time.Time
+	// invalidateGen 是读缓存失效代数:每次 invalidateReadCache 递增。
+	// 读命令在执行前记录代数,提交结果时代数已变说明执行期间有动作命令
+	// 完成并失效了读缓存——本次读到的可能是动作前的旧数据(设备读取先于
+	// 动作完成、缓存提交又被调度延迟到失效之后,溢出协程与 worker 并发时
+	// 窗口真实存在),不得按新鲜数据写回,丢弃本次结果等待重跑。
+	invalidateGen uint64
 }
 
 var atCommandCache = &atCommandCacheManager{
@@ -97,6 +110,11 @@ func (m *atCommandCacheManager) Start(mockMode bool) {
 // 尚未就绪,先暂存到 deferred,优先检查并执行队列中已就绪的命令(动作
 // 命令总是就绪);没有可执行命令时短睡眠轮询,避免忙等。保护期内读命令
 // 对外仍立即返回后台处理中(由 Fetch 的 startupDelayedRead 分支保证)。
+// 正常运行期动作命令同样优先:每轮把队列中已到达的命令全部收进 deferred,
+// 先挑动作命令执行,再按 FIFO 挑读命令——动作命令(锁频/重启/改配置)的
+// Fetch 等待预算有限,排在长读命令(短信列表最坏 42s)之后会让调用方超时
+// 误报 pending(锁频假失败/重启假成功),优先取出把排队等待压缩到"至多
+// 一条在执行中的命令"。
 func (m *atCommandCacheManager) worker() {
 	var deferred []string
 	for {
@@ -109,11 +127,28 @@ func (m *atCommandCacheManager) worker() {
 			case <-time.After(atCacheWorkerIdleSleep):
 			}
 		}
+	drain:
+		for {
+			select {
+			case command := <-m.queue:
+				deferred = append(deferred, command)
+			default:
+				break drain
+			}
+		}
 		index := -1
 		for i, command := range deferred {
-			if m.readyToRunNow(command) {
+			if isATActionCommand(command) && m.readyToRunNow(command) {
 				index = i
 				break
+			}
+		}
+		if index < 0 {
+			for i, command := range deferred {
+				if m.readyToRunNow(command) {
+					index = i
+					break
+				}
 			}
 		}
 		if index < 0 {
@@ -203,6 +238,13 @@ func (m *atCommandCacheManager) Fetch(command string, force bool, waitOverride *
 		case <-time.After(atCacheWaitTimeout(command)):
 		}
 		has, response, errorText, _, running = m.snapshot(command)
+		// 溢出限流放弃路径:done 被关闭但条目从未执行(无数据、无错误文本、
+		// running 已复位)。按 enqueue 处的注释承诺返回 pending 文本——空串
+		// 会被各页面解析器(atReadFailed)当成"AT 读取失败"弹错误横幅,而
+		// 实际只是本机过载限流,模块完好,语义上是可重试的未就绪态。
+		if !has && strings.TrimSpace(errorText) == "" && !running {
+			return atCachePendingText
+		}
 	}
 
 	return m.responseOrPending(has, response, errorText, running)
@@ -279,6 +321,10 @@ func (m *atCommandCacheManager) enqueue(command string, force bool) <-chan struc
 		m.entries[command] = e
 	}
 	if e.running {
+		// 并发动作命令不得静默合并(见 pendingForce 注释):计数补跑。
+		if force && isATActionCommand(command) {
+			e.pendingForce++
+		}
 		e.waiters = append(e.waiters, done)
 		m.mu.Unlock()
 		return done
@@ -333,6 +379,9 @@ func (m *atCommandCacheManager) run(command string) {
 	}
 
 	mockMode := m.currentMockMode()
+	m.mu.Lock()
+	startGen := m.invalidateGen
+	m.mu.Unlock()
 	response, err := executeCachedATCommand(command, mockMode)
 	errorText := ""
 	if err != nil {
@@ -347,6 +396,21 @@ func (m *atCommandCacheManager) run(command string) {
 	if e == nil {
 		e = &atCacheEntry{command: command}
 		m.entries[command] = e
+	}
+	// 执行期间有动作命令完成并失效了读缓存:本次读到的可能是动作前的旧
+	// 数据(设备读取先于动作完成、缓存提交被调度延迟到失效之后),不得按
+	// 新鲜数据写回(见 invalidateGen)。丢弃本次结果,条目保持失效态,
+	// Fetch 早退分支经 running=false 返回 pending,周期刷新会重跑。
+	if !isATActionCommand(command) && startGen != m.invalidateGen {
+		e.running = false
+		staleWaiters := e.waiters
+		e.waiters = nil
+		m.mu.Unlock()
+		for _, waiter := range staleWaiters {
+			close(waiter)
+		}
+		log.Printf("AT 缓存: 执行期间读缓存已被动作命令失效,丢弃本次结果: command=%q", command)
+		return
 	}
 	// 执行失败不得用部分输出/错误文本覆盖上次成功的响应:负缓存窗口内
 	// (has==true 时 responseOrPending 优先返回 response)覆盖会把截断的
@@ -369,9 +433,20 @@ func (m *atCommandCacheManager) run(command string) {
 	} else {
 		e.failedAt = time.Now()
 	}
-	e.running = false
-	waiters := e.waiters
-	e.waiters = nil
+	// 并发动作命令补跑(见 pendingForce 注释):计数未清零时保持 running,
+	// waiters 留到补跑完成后再统一唤醒,本次不提交"已执行"假象。
+	rerun := false
+	if e.pendingForce > 0 {
+		e.pendingForce--
+		rerun = true
+	} else {
+		e.running = false
+	}
+	var waiters []chan struct{}
+	if !rerun {
+		waiters = e.waiters
+		e.waiters = nil
+	}
 	m.mu.Unlock()
 
 	for _, waiter := range waiters {
@@ -407,6 +482,16 @@ func (m *atCommandCacheManager) run(command string) {
 			m.enqueueCachedReadCommands()
 		}()
 	}
+	if rerun {
+		// 补跑优先走正常队列(worker 对动作命令优先取出);队列满时直接
+		// 协程执行(动作命令不受开机保护期限制,设备访问由全局 AT 文件锁
+		// 串行化,与 worker 并发执行安全)。
+		select {
+		case m.queue <- command:
+		default:
+			go m.run(command)
+		}
+	}
 }
 
 // invalidateReadCache 在动作命令(重启/改 IMEI 等)执行后使读缓存失效。
@@ -418,8 +503,13 @@ func (m *atCommandCacheManager) run(command string) {
 func (m *atCommandCacheManager) invalidateReadCache() {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	// 代数递增:在途读命令(含溢出协程)的结果可能产自本次动作之前,
+	// 提交时按代数变化丢弃(见 run 的 startGen 检查),因此 running 条目
+	// 也一并清空——旧实现跳过 running 条目,在途读命令会把动作前读到的
+	// 旧数据在失效之后写回缓存并标记为新鲜,形成"写成功但显示旧状态"。
+	m.invalidateGen++
 	for command, entry := range m.entries {
-		if entry.running || isATActionCommand(command) {
+		if isATActionCommand(command) {
 			continue
 		}
 		entry.updatedAt = time.Time{}
@@ -577,14 +667,25 @@ func boolQuery(r *http.Request, name string, fallback bool) bool {
 	return value == "1" || value == "yes" || value == "on"
 }
 
+// atCacheActionQueueAllowanceMS 是动作命令等待预算中的排队余量:worker 对
+// 动作命令优先取出(见 worker 注释)后,排队等待被压缩到"至多一条正在
+// 执行中的命令",运行期读命令的最坏耗时为短信列表的重试预算
+// (2×21s+250ms≈42.3s),向上取整为 45s。不计入排队等待时,动作 Fetch 在
+// 自身单次预算(约 3s)后即放弃并返回 pending:锁频会被 atResponseOK 误判
+// "操作失败"(实际稍后生效),重启会被 atResponseRebootOK 误判成功
+// (实际尚未执行),多步动作序列会在中途错误中止。
+const atCacheActionQueueAllowanceMS = 45000
+
 func atCacheWaitTimeout(command string) time.Duration {
 	// 读取命令超时后运行器会重试一次(250ms 间隔),最坏耗时为
-	// 2×命令超时+重试间隔;动作命令(写/重启/删除)不会重试,单次预算即可。
-	// 等待预算必须覆盖对应最坏值,否则首次尝试超时后 Fetch 提前放弃
-	// 返回 pending/旧数据,而重试其实仍在进行并最终成功。
+	// 2×命令超时+重试间隔;动作命令(写/重启/删除)不会重试,单次预算
+	// 加上排队余量即可。等待预算必须覆盖对应最坏值,否则首次尝试超时后
+	// Fetch 提前放弃返回 pending/旧数据,而执行/重试其实仍在进行。
 	budget := atCommandTimeoutMS(command)
 	if !isATActionCommand(command) {
 		budget = 2*budget + 250
+	} else {
+		budget += atCacheActionQueueAllowanceMS
 	}
 	timeout := time.Duration(budget+2000) * time.Millisecond
 	if timeout < 2*time.Second {

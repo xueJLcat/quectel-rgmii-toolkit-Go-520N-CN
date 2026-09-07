@@ -145,9 +145,19 @@ func isATCacheRefreshEligible(command string, lastRequested time.Time) bool {
 	return time.Since(lastRequested) < atCacheRecentRequestWindow
 }
 
+// isATActionCommand 判定命令是否为动作类(写/重启/删除)。入参可能是带
+// "\r\n" 结尾的 payload(运行器在 at_runner 的重试防护处直接传 payload),
+// 必须先净化再匹配:裸 AT&F/AT&W 的精确匹配形态若被尾部 \r\n 击穿,
+// 破坏性命令超时后会被运行器盲目重发(恢复出厂被执行两次)。
 func isATActionCommand(command string) bool {
-	upper := strings.ToUpper(command)
-	if upper == "AT&F" || strings.Contains(upper, ";AT&F") {
+	upper := strings.ToUpper(sanitizeATCommand(command))
+	if upper == "AT&F" || strings.Contains(upper, ";AT&F") || upper == "AT&W" || strings.Contains(upper, ";AT&W") {
+		return true
+	}
+	// +COPS=<mode>[,...] 手动选网/去注册是写命令;读形态 +COPS=? (查询
+	// 支持的模式)豁免,否则查询会被误判动作:不缓存、不重试,执行后还会
+	// 全量失效读缓存。
+	if strings.Contains(upper, "+COPS=") && !strings.Contains(upper, "+COPS=?") {
 		return true
 	}
 	patterns := []string{
@@ -155,9 +165,20 @@ func isATActionCommand(command string) bool {
 		"+EGMR=",
 		"+CMGD",
 		"+CMGS",
+		"+CMGW",
 		"+QSCAN=",
 		"+CGDCONT=",
 		"+QMAPWAC=",
+		"+QPOWD=",
+		// 写形态补全:以下命令可经通用入口(get_atcache/user_atcommand/AT 代理)
+		// 到达,漏判为读命令会在超时后被运行器盲目重发(写命令可能已执行,
+		// 重发即重复执行),结果还会被按默认档缓存 3 秒。查询形态不受影响:
+		// +CPIN?/+CSCA?/+COPS?/+QMBNCFG="List" 均不含下列写模式。
+		`+CPIN="`, // 解锁 PIN(查询形态 +CPIN? 不含 =" )
+		`+CSCA="`, // 写短信中心号码(查询形态 +CSCA? 不含 =" )
+		`+QMBNCFG="SELECT"`,
+		`+QMBNCFG="DELETE"`,
+		`+QMBNCFG="ACTIVE"`,
 		`+QCFG="USBNET",`,
 		`+QMAP="MPDN_RULE",0`,
 		`+QMAP="DHCPV6DNS",`,
