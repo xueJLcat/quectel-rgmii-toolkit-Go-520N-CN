@@ -25,7 +25,9 @@ GOTARGETS ?= ./cmd/simpleadmin-httpd
 # 构建时注入 main.appVersion，服务运行期间把 HTML 里的 ?v=__SA_VERSION__
 # 占位符替换为该版本号，发版不再需要手工改前端缓存参数。
 # 覆盖示例：make arm VERSION=2.97
-VERSION   ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo 2.97)
+# git 不可用(源码 tarball/非仓库拷贝)时的回退值与 version.go 的内置
+# 默认(appVersion)保持一致，避免同一代码出现两个"默认版本"。
+VERSION   ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo 2.98)
 
 # Go 模块目录（含 go.mod，模块名 simpleadmin-httpd）
 GO_SRC := go-build/simpleadmin-go

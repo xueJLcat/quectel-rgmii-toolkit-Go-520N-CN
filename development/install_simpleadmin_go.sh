@@ -229,7 +229,15 @@ stop_existing_simpleadmin_runtime() {
         pid="$(cat "$FALLBACK_PID_FILE" 2>/dev/null || true)"
         case "$pid" in
             ""|*[!0-9]*) ;;
-            *) kill "$pid" >/dev/null 2>&1 || true ;;
+            *)
+                # PID 文件在持久分区(/usrdata),掉电重启后残留的 PID 可能被
+                # 任意厂商进程复用:kill 前必须按 /proc cmdline 校验身份,
+                # 否则会误杀无辜进程。
+                cmd="$(tr '\000' ' ' < "/proc/$pid/cmdline" 2>/dev/null || true)"
+                case "$cmd" in
+                    *simpleadmin-httpd*) kill "$pid" >/dev/null 2>&1 || true ;;
+                esac
+                ;;
         esac
         rm -f "$FALLBACK_PID_FILE"
     fi
@@ -303,8 +311,12 @@ install_simpleadmin_files() {
     require_file "$SIMPLEADMIN_SRC/systemd/simpleadmin-httpd.service"
     require_file "$SIMPLEADMIN_SRC/simplepasswd"
     require_file "$MOBILEAP_HELPER_SRC"
+    # www 目录必须完整:下方先删旧 www 再复制,若复制失败(空间不足/staging
+    # 不完整),二进制的 validateStaticDir 会因缺 index.html 直接 log.Fatalf,
+    # 独立安装(adb/手动)又没有 deploy 的备份回滚兜底,服务将永久起不来。
+    require_file "$SIMPLEADMIN_SRC/www/index.html"
 
-    mkdir -p "$SIMPLEADMIN_DIR" "$SIMPLEADMIN_DIR/www" "$ROOT_BIN"
+    mkdir -p "$SIMPLEADMIN_DIR" "$SIMPLEADMIN_DIR/www" "$ROOT_BIN" || fail "无法创建安装目录"
 
     rm -f /tmp/simpleadmin.auth.backup
     if is_valid_auth_file "$SIMPLEADMIN_DIR/simpleadmin.auth"; then
@@ -313,16 +325,41 @@ install_simpleadmin_files() {
         warn "现有认证文件为空或格式无效，已重置为默认 admin/admin"
     fi
 
+    # 保留运行时偏好目录 www/config(get_theme.json/get_language.json 由后端
+    # 运行时写入):整体替换 www 会把用户主题/语言在每次升级后重置回仓库
+    # 默认值,与本地 sync-www.sh 的"config 已存在绝不改动"行为不一致。
+    rm -rf /tmp/simpleadmin-www-config.backup
+    if [ -d "$SIMPLEADMIN_DIR/www/config" ]; then
+        cp -a "$SIMPLEADMIN_DIR/www/config" /tmp/simpleadmin-www-config.backup 2>/dev/null \
+            || warn "备份 www/config 失败,本次升级将重置主题/语言偏好"
+    fi
+
     rm -rf "$SIMPLEADMIN_DIR/www" "$SIMPLEADMIN_DIR/console" "$SIMPLEADMIN_DIR/systemd"
     mkdir -p "$SIMPLEADMIN_DIR/systemd"
 
-    cp -f "$SIMPLEADMIN_SRC/simpleadmin-httpd.armv7" "$SIMPLEADMIN_DIR/simpleadmin-httpd"
-    chmod +x "$SIMPLEADMIN_DIR/simpleadmin-httpd"
+    # 二进制先写临时文件再 mv(同目录原子替换):cp -f 直写在中途 ENOSPC/
+    # 掉电时留下截断二进制,旧版已被覆盖、新版不完整,两边都起不来。
+    cp -f "$SIMPLEADMIN_SRC/simpleadmin-httpd.armv7" "$SIMPLEADMIN_DIR/simpleadmin-httpd.tmp.$$" \
+        || fail "复制二进制失败(检查 /usrdata 剩余空间)"
+    chmod +x "$SIMPLEADMIN_DIR/simpleadmin-httpd.tmp.$$"
+    mv -f "$SIMPLEADMIN_DIR/simpleadmin-httpd.tmp.$$" "$SIMPLEADMIN_DIR/simpleadmin-httpd" \
+        || fail "替换二进制失败"
 
-    cp -rf "$SIMPLEADMIN_SRC/www" "$SIMPLEADMIN_DIR/www"
+    cp -rf "$SIMPLEADMIN_SRC/www" "$SIMPLEADMIN_DIR/www" \
+        || fail "复制 www 失败(检查 /usrdata 剩余空间)"
+    if [ ! -f "$SIMPLEADMIN_DIR/www/index.html" ]; then
+        fail "www 复制不完整(缺 index.html),服务将无法启动"
+    fi
+    if [ -d /tmp/simpleadmin-www-config.backup ]; then
+        mkdir -p "$SIMPLEADMIN_DIR/www/config"
+        cp -a /tmp/simpleadmin-www-config.backup/. "$SIMPLEADMIN_DIR/www/config/" 2>/dev/null \
+            || warn "恢复 www/config 失败,主题/语言偏好可能被重置"
+        rm -rf /tmp/simpleadmin-www-config.backup
+    fi
 
-    cp -f "$SIMPLEADMIN_SRC/simplepasswd" "$ROOT_BIN/simplepasswd"
-    chmod +x "$ROOT_BIN/simplepasswd"
+    cp -f "$SIMPLEADMIN_SRC/simplepasswd" "$ROOT_BIN/simplepasswd" \
+        || warn "复制 simplepasswd 失败(不影响主服务)"
+    chmod +x "$ROOT_BIN/simplepasswd" 2>/dev/null || true
 
     install_mobileap_helper_script
 
@@ -334,7 +371,8 @@ install_simpleadmin_files() {
     fi
     chmod 600 "$SIMPLEADMIN_DIR/simpleadmin.auth"
 
-    cp -f "$SIMPLEADMIN_SRC/systemd/$SYSTEMD_UNIT" "$SIMPLEADMIN_DIR/systemd/$SYSTEMD_UNIT"
+    cp -f "$SIMPLEADMIN_SRC/systemd/$SYSTEMD_UNIT" "$SIMPLEADMIN_DIR/systemd/$SYSTEMD_UNIT" \
+        || fail "复制 systemd 单元失败"
     install_fallback_scripts
     install_systemd_unit || warn "systemd 服务无法安装到 /lib/systemd/system；如果服务无法启动，将使用 post_boot 兜底"
 }
@@ -493,17 +531,48 @@ if [ ! -x "$BIN" ]; then
     exit 1
 fi
 
+# 主服务进程身份判定:PID 文件在持久分区,掉电重启后残留 PID 可能被任意
+# 厂商进程复用;__smd-reader 子进程的 argv[0] 又是同一二进制路径,pidof 会
+# 一并命中。两种误认都会让启动脚本把"没在运行"判成"已在运行"(拒绝启动,
+# post_boot 兜底静默失效)或把错误 PID 写进 PID 文件(停止脚本误杀)。
+pid_is_simpleadmin_server() {
+    _cand="$1"
+    [ -n "$_cand" ] || return 1
+    [ -r "/proc/$_cand/cmdline" ] || return 1
+    _cmd="$(tr '\000' ' ' < "/proc/$_cand/cmdline" 2>/dev/null)"
+    case "$_cmd" in
+        *simpleadmin-httpd*) ;;
+        *) return 1 ;;
+    esac
+    case "$_cmd" in
+        *__smd-reader*) return 1 ;;
+    esac
+    return 0
+}
+
 if [ -f "$PID_FILE" ]; then
     OLD_PID="$(cat "$PID_FILE" 2>/dev/null || true)"
-    if [ -n "$OLD_PID" ] && kill -0 "$OLD_PID" 2>/dev/null; then
+    if pid_is_simpleadmin_server "$OLD_PID" && kill -0 "$OLD_PID" 2>/dev/null; then
         echo "[OK] simpleadmin-httpd already running: $OLD_PID"
         exit 0
     fi
+    rm -f "$PID_FILE"
 fi
 
-RUNNING_PID="$(pidof simpleadmin-httpd 2>/dev/null | awk '{print $1}' || true)"
+RUNNING_PID=""
+for _cand in $(pidof simpleadmin-httpd 2>/dev/null); do
+    if pid_is_simpleadmin_server "$_cand"; then
+        RUNNING_PID="$_cand"
+        break
+    fi
+done
 if [ -z "$RUNNING_PID" ]; then
-    RUNNING_PID="$(ps 2>/dev/null | grep '[s]impleadmin-httpd' | awk '{print $1; exit}' || true)"
+    for _cand in $(ps 2>/dev/null | grep '[s]impleadmin-httpd' | awk '{print $1}'); do
+        if pid_is_simpleadmin_server "$_cand"; then
+            RUNNING_PID="$_cand"
+            break
+        fi
+    done
 fi
 if [ -n "$RUNNING_PID" ]; then
     echo "$RUNNING_PID" > "$PID_FILE"
@@ -638,8 +707,11 @@ PID_FILE="$SIMPLEADMIN_DIR/simpleadmin-httpd.pid"
 
 if [ -f "$PID_FILE" ]; then
     PID="$(cat "$PID_FILE" 2>/dev/null || true)"
-    if [ -n "$PID" ]; then
-        kill "$PID" >/dev/null 2>&1 || true
+    # 持久分区残留 PID 可能已被无关进程复用:按 /proc cmdline 校验身份再杀。
+    if [ -n "$PID" ] && [ -r "/proc/$PID/cmdline" ]; then
+        case "$(tr '\000' ' ' < "/proc/$PID/cmdline" 2>/dev/null)" in
+            *simpleadmin-httpd*) kill "$PID" >/dev/null 2>&1 || true ;;
+        esac
     fi
     rm -f "$PID_FILE"
 fi
@@ -698,17 +770,46 @@ start_fallback_service() {
     fi
 }
 
+# probe_local_http 本机 HTTP 探活(带重试):探测公开端点 /api/module_model
+# (免认证、纯常量应答、不产生 AT 流量),既证明端口在听、又证明应答者是
+# simpleadmin-httpd 而不是复活的厂商 Web 服务。启动路径包含 iptables 重放
+# 等前置动作,监听建立需要数秒,故重试 6 次 × 1s。无 wget/curl 时降级为
+# 信任 systemd 状态(返回 0)。
+probe_local_http() {
+    _i=0
+    while [ "$_i" -lt 6 ]; do
+        if command -v wget >/dev/null 2>&1; then
+            wget -q -O /dev/null -T 2 "http://127.0.0.1/api/module_model" 2>/dev/null && return 0
+        elif command -v curl >/dev/null 2>&1; then
+            curl -sf -m 2 -o /dev/null "http://127.0.0.1/api/module_model" 2>/dev/null && return 0
+        else
+            return 0
+        fi
+        _i=$((_i + 1))
+        sleep 1
+    done
+    return 1
+}
+
 restart_services() {
     if [ "$SERVICE_UNIT_INSTALLED" = "1" ] && command -v systemctl >/dev/null 2>&1; then
         log "正在重载 systemd 并启动 SimpleAdmin Go 服务（AT 调试关闭）"
         systemctl daemon-reload >/dev/null 2>&1 || true
         systemctl enable "$SYSTEMD_UNIT" >/dev/null 2>&1 || true
         systemctl restart "$SYSTEMD_UNIT" >/dev/null 2>&1 || warn "服务启动失败或当前设备不支持: $SYSTEMD_UNIT"
-        if systemctl is-active "$SYSTEMD_UNIT" >/dev/null 2>&1; then
+        # is-active 对 activating(auto-restart)同样返回 0:崩溃循环中的服务
+        # 会被误报"安装成功"。要求 SubState=running 且本机 HTTP 探活通过。
+        if systemctl is-active "$SYSTEMD_UNIT" >/dev/null 2>&1 \
+           && systemctl show -p SubState "$SYSTEMD_UNIT" 2>/dev/null | grep -q '=running' \
+           && probe_local_http; then
             echo "[成功] $SYSTEMD_UNIT 已启动"
+            # systemd 接管成功后必须清掉历史 post_boot 兜底块:两者共存时
+            # 每次开机 post_boot 拉起的 nohup 实例会与单元竞争 80 端口,
+            # 被 ExecStartPre 反复击杀,PID 文件也会被写成 systemd 进程。
+            remove_post_boot_autostart
             return 0
         fi
-        warn "$SYSTEMD_UNIT 未处于 active 状态，改用 post_boot 自启动"
+        warn "$SYSTEMD_UNIT 未达到 running/探活未通过，改用 post_boot 自启动"
     fi
 
     if [ "$SERVICE_UNIT_INSTALLED" != "1" ]; then
@@ -751,6 +852,9 @@ write_reboot_marker_if_mobileap_cfg_touched() {
 main() {
     [ -d "$SIMPLEADMIN_SRC" ] || fail "安装包不完整: $SIMPLEADMIN_SRC"
     log "开始安装 SimpleAdmin Go 和 Go 原生 SMD AT 服务"
+    # 任何退出路径(含 fail)都恢复根文件系统只读:旧实现只在成功路径
+    # remount_ro,失败退出后 / 保持 rw,厂商只读假设被破坏且无人恢复。
+    trap remount_ro EXIT
     reset_install_runtime_markers
     remount_rw
     stop_existing_simpleadmin_runtime
@@ -758,8 +862,11 @@ main() {
     install_simpleadmin_files
     install_at_device_config
     install_ttl_state
-    maybe_install_bridge0_mac_config
     restart_services
+    # QCMAP 配置在服务启动成功之后才修改:旧顺序先改再启动,启动失败 fail
+    # 退出时 deploy 回滚只恢复二进制/www,QCMAP 已带着新 MAC/EarlyEthMode
+    # 留在设备上无人回滚,且 REBOOT_REQUIRED 提示被 FAIL 结果覆盖丢失。
+    maybe_install_bridge0_mac_config
     remount_ro
     write_reboot_marker_if_mobileap_cfg_touched
     write_install_success_result

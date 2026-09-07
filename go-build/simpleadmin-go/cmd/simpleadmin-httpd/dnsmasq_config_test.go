@@ -366,7 +366,9 @@ func TestDnsmasqMacBindStateFile(t *testing.T) {
 	})
 }
 
-// 说明:applyDNSUpstream 的并发串行化不在本文件测试。该函数的文件路径为常量、
-// 校验/重启为直接 exec,无可注入桩,单测中无法真实并发调用;串行性由
-// native_dnsmasq.go 中的包级锁 dnsUpstreamMu 保证(锁住整个事务含回滚,
-// 覆盖页面保存与开机自愈两个调用点),详见其声明处注释。
+// 说明:上游 DNS 的并发串行化不在本文件测试。applyDNSUpstreamLocked 的文件
+// 路径为常量、校验/重启为直接 exec,无可注入桩,单测中无法真实并发调用;
+// 串行性由包级锁 dnsUpstreamMu(声明于 dnsmasq_config.go)保证:锁范围覆盖
+// 调用方的完整事务(页面保存的"应用→写状态"、开机自愈的"读状态→复验→
+// 应用"),锁序判别行为由 functional_review_round7_fixes_test.go 的
+// TestDNSUpstreamSetHoldsTransactionLock 锚定,详见 dnsUpstreamMu 声明处注释。
