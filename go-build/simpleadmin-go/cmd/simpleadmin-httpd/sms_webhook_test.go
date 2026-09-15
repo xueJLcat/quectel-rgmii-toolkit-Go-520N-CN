@@ -9,34 +9,42 @@ import (
 )
 
 type smsWebhookPostRecord struct {
-	url  string
-	body []byte
+	url     string
+	body    []byte
+	method  string
+	headers map[string]string
 }
 
 func setupSMSWebhookTest(t *testing.T) {
 	t.Helper()
 	oldTTLFile := runtimeTTLValueFile
 	oldPost := smsWebhookPost
+	oldServerChanPost := serverChanPost
 	oldHighWater := smsWebhookHighWater
 	oldInitialized := smsWebhookInitialized
+	oldFreedSlots := smsWebhookFreedSlots
 	t.Cleanup(func() {
 		stopSMSWebhookPoller()
 		runtimeTTLValueFile = oldTTLFile
 		smsWebhookPost = oldPost
+		serverChanPost = oldServerChanPost
 		smsWebhookHighWater = oldHighWater
 		smsWebhookInitialized = oldInitialized
+		smsWebhookFreedSlots = oldFreedSlots
 	})
 	runtimeTTLValueFile = filepath.Join(t.TempDir(), "ttlvalue")
 	smsWebhookPost = defaultSMSWebhookPost
+	serverChanPost = defaultServerChanPost
 	smsWebhookHighWater = map[string]int{}
 	smsWebhookInitialized = map[string]bool{}
+	smsWebhookFreedSlots = map[string]map[int]bool{}
 }
 
 func installSMSWebhookRecorder(t *testing.T) <-chan smsWebhookPostRecord {
 	t.Helper()
 	ch := make(chan smsWebhookPostRecord, 16)
-	smsWebhookPost = func(url string, body []byte) error {
-		ch <- smsWebhookPostRecord{url: url, body: body}
+	smsWebhookPost = func(rq smsWebhookRequest) error {
+		ch <- smsWebhookPostRecord{url: rq.URL, body: rq.Body, method: rq.Method, headers: rq.Headers}
 		return nil
 	}
 	return ch

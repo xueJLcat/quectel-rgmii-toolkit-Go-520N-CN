@@ -40,8 +40,9 @@ func (s *simpleAdminServer) handleDashboardData(w http.ResponseWriter, r *http.R
 }
 
 const (
-	// 总览页探测的总超时:断网时 nativePing 会逐个拨号 3 个地址
-	// (每个 1.5s),不加总超时会阻塞请求约 4.5s,拖垮 2s 轮询。
+	// 总览页探测的总超时:dialAnyTarget 并行拨号 3 个地址,每个独立
+	// 1.5s 超时,总耗时不超过单目标超时;总超时与拨号超时对齐即可,
+	// 不会拖垮 2s 轮询。
 	dashboardPingTimeout = 1500 * time.Millisecond
 	// 探测结果短缓存:轮询命中缓存不再真实探测。
 	dashboardPingCacheTTL = 5 * time.Second
@@ -59,6 +60,9 @@ var dashboardPingCache = struct {
 
 // dashboardInternetAlive 返回带总超时与短缓存的连通性探测结果。
 // 缓存有效期内直接复用上次结果;过期后在总超时内真实探测一次并回填。
+// 探测 ctx 派生自 Background 而不是请求 ctx:结果是全局共享缓存,若绑定
+// 单个请求的生命周期,客户端在探测中途刷新/断开页面会让 DialContext 立即
+// 失败,把"请求被取消"的 false 写进缓存,5 秒内所有客户端都看到假"未连接"。
 func dashboardInternetAlive(ctx context.Context) bool {
 	dashboardPingCache.Lock()
 	if time.Now().Before(dashboardPingCache.validUntil) {
@@ -68,7 +72,7 @@ func dashboardInternetAlive(ctx context.Context) bool {
 	}
 	dashboardPingCache.Unlock()
 
-	pingCtx, cancel := context.WithTimeout(ctx, dashboardPingTimeout)
+	pingCtx, cancel := context.WithTimeout(context.Background(), dashboardPingTimeout)
 	defer cancel()
 	result := dashboardPingProbe(pingCtx)
 
@@ -120,7 +124,7 @@ func parseDashboardAT(raw string) map[string]any {
 	simExplicitAbsent := false
 	for _, line := range lines {
 		upperLine := strings.ToUpper(line)
-		if strings.Contains(upperLine, "SIM NOT INSERTED") || strings.Contains(upperLine, "+CME ERROR: 10") || strings.Contains(upperLine, "+CPIN: NOT INSERTED") {
+		if isSIMAbsentEvidence(upperLine) {
 			simStatusKnown = true
 			simInserted = false
 		}
@@ -214,19 +218,41 @@ func parseDashboardAT(raw string) map[string]any {
 		case strings.HasPrefix(line, "+QRSRP:"):
 			qrsrpLines = append(qrsrpLines, line)
 		case strings.HasPrefix(line, "+QGDNRCNT:"):
+			// 字段序按 RG520N 官方手册 §9.7:+QGDNRCNT: <bytes_sent>,<bytes_recv>
+			// (sent 在前)。旧实现把 parts[0] 当接收字节,上下行恰好颠倒
+			// (实机抓取样例 QGDNRCNT: 1961485,17217894 + QGDCNT: 1979589,17236170
+			// 交叉验证:sent 在前的解读下总量逐方向 ≥ NR 分量且差值恰为 LTE
+			// 增量,下载 17MB > 上传 2MB 也符合 CPE 真实流量画像)。
 			parts := strings.Split(strings.TrimSpace(strings.TrimPrefix(line, "+QGDNRCNT:")), ",")
 			if len(parts) >= 2 {
-				rx, _ := strconv.ParseInt(strings.TrimSpace(parts[0]), 10, 64)
-				tx, _ := strconv.ParseInt(strings.TrimSpace(parts[1]), 10, 64)
-				data["nr_rx_bytes"] = rx
-				data["nr_tx_bytes"] = tx
-				data["nr_rx_human"] = humanBytesGo(float64(rx))
-				data["nr_tx_human"] = humanBytesGo(float64(tx))
+				tx, _ := strconv.ParseInt(strings.TrimSpace(parts[0]), 10, 64)
+				rx, _ := strconv.ParseInt(strings.TrimSpace(parts[1]), 10, 64)
+				mergeDashboardDataCounters(data, rx, tx)
+			}
+		case strings.HasPrefix(line, "+QGDCNT:"):
+			// +QGDCNT 是传统全量计数器(手册 §9.7:QGDNRCNT 相比 QGDCNT 额外
+			// 支持 NR5G 计数),组合命令一直在查询它,旧实现却没有对应解析
+			// 分支,整行丢弃——LTE 驻留(无 5G 覆盖)时 QGDNRCNT 恒 0,
+			// "累计流量"/速率/趋势图全为零,而用户实际在跑流量。
+			// 字段序与 QGDNRCNT 一致:<bytes_sent>,<bytes_recv>(EC2x 手册
+			// §10.15 与上述实机样例双重印证)。
+			parts := strings.Split(strings.TrimSpace(strings.TrimPrefix(line, "+QGDCNT:")), ",")
+			if len(parts) >= 2 {
+				tx, _ := strconv.ParseInt(strings.TrimSpace(parts[0]), 10, 64)
+				rx, _ := strconv.ParseInt(strings.TrimSpace(parts[1]), 10, 64)
+				mergeDashboardDataCounters(data, rx, tx)
 			}
 		}
 	}
 	if tempCount > 0 {
-		data["temperature"] = strconv.Itoa((tempSum + tempCount/2) / tempCount)
+		// 四舍五入到最近整数:Go 整数除法向零截断,"+count/2"的补偿只对
+		// 非负和成立;平均温度为负(严寒部署)时需改为 -count/2,否则显示
+		// 偏差 1°C(如 -4.25 会显示 -3)。
+		adjusted := tempSum + tempCount/2
+		if tempSum < 0 {
+			adjusted = tempSum - tempCount/2
+		}
+		data["temperature"] = strconv.Itoa(adjusted / tempCount)
 	}
 	if simExplicitAbsent || (simStatusKnown && !simInserted) {
 		applyDashboardSIMAbsent(data)
@@ -243,6 +269,23 @@ func parseDashboardAT(raw string) map[string]any {
 		data["signalAssessment"] = signalQualityGo(sig)
 	}
 	return data
+}
+
+// mergeDashboardDataCounters 以"逐方向取较大值"合并流量计数器:+QGDNRCNT
+// (仅 NR)与 +QGDCNT(全制式总量)都是累计值,总量 ≥ NR 分量。取 max 使
+// 两个计数器同时在场时展示总量;固件不支持/重置了 QGDCNT 时退回 NR 计数,
+// 单个计数器被重置也不会让展示值倒退。
+func mergeDashboardDataCounters(data map[string]any, rx, tx int64) {
+	if cur, ok := data["nr_rx_bytes"].(int64); !ok || rx > cur {
+		data["nr_rx_bytes"] = rx
+	}
+	if cur, ok := data["nr_tx_bytes"].(int64); !ok || tx > cur {
+		data["nr_tx_bytes"] = tx
+	}
+	rxTotal, _ := data["nr_rx_bytes"].(int64)
+	txTotal, _ := data["nr_tx_bytes"].(int64)
+	data["nr_rx_human"] = humanBytesGo(float64(rxTotal))
+	data["nr_tx_human"] = humanBytesGo(float64(txTotal))
 }
 
 func applyDashboardSIMAbsent(data map[string]any) {
@@ -657,7 +700,13 @@ func shortBandName(s string) string {
 }
 
 func bwMHz(code string, nr bool) string {
-	n := toInt(code)
+	// 严格解析带宽编码:"-" 占位/空/非数字字段必须显示 "-"。旧实现经
+	// toInt 吞错返回 0,与合法编码 0 混同,残缺行会显示假 "5MHz"/"1.4MHz",
+	// 把"未知"伪装成确定值(同函数对超表编码已正确返回 "-")。
+	n, err := strconv.Atoi(strings.TrimSpace(code))
+	if err != nil {
+		return "-"
+	}
 	if nr {
 		if n >= 0 && n <= 5 {
 			return fmt.Sprintf("%dMHz", (n+1)*5)

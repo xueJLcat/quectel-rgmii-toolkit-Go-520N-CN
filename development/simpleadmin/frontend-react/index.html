@@ -1,0 +1,38 @@
+<!doctype html>
+<html data-bs-theme="__SA_THEME__" lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta content="width=device-width, initial-scale=1" name="viewport" />
+    <meta name="sa-version" content="__SA_VERSION__" />
+    <title>RG520N-CN</title>
+    <script>
+      (function () {
+        try {
+          if ("scrollRestoration" in history) {
+            history.scrollRestoration = "manual";
+          }
+          var stored = null;
+          try {
+            stored = localStorage.getItem("theme");
+          } catch (storageError) {}
+          var theme =
+            stored === "dark" || stored === "light"
+              ? stored
+              : document.documentElement.getAttribute("data-bs-theme");
+          theme = theme === "dark" ? "dark" : "light";
+          document.documentElement.setAttribute("data-bs-theme", theme);
+          document.documentElement.style.colorScheme = theme;
+        } catch (e) {
+          document.documentElement.setAttribute("data-bs-theme", "light");
+          document.documentElement.style.colorScheme = "light";
+        }
+      })();
+    </script>
+    <link href="/css/Poppins.css" rel="stylesheet" />
+    <link href="/favicon.ico" rel="icon" />
+  </head>
+  <body>
+    <div id="root"></div>
+    <script type="module" src="/src/main.tsx"></script>
+  </body>
+</html>

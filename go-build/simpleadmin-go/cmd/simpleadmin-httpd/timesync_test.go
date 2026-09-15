@@ -256,9 +256,15 @@ func TestRunTimeSyncOnceQueryFailure(t *testing.T) {
 	}
 }
 
+// TestRunTimeSyncOnceRejectsHugeOffset 回拨护栏:本地时钟已合理时,向后
+// 大幅步进(本地超前一年以上)拒绝写入。注意本测试原以向前 +400 天偏差
+// 固化"拒绝"语义,该行为已被确认为缺陷并修正(无电池时钟设备开机时钟为
+// 固件构建日期,向前大偏差是冷启动常态,拒绝会让校时在其主场景永久失效,
+// 见 timeSyncMinPlausibleTime 注释;向前放行由
+// TestRunTimeSyncOnceAllowsHugeForwardOffsetBuildDateClock 锚定)。
 func TestRunTimeSyncOnceRejectsHugeOffset(t *testing.T) {
 	withTempTimeSyncEnv(t)
-	queries, applied := withFakeTimeSync(t, 400*24*time.Hour, nil, nil)
+	queries, applied := withFakeTimeSync(t, -400*24*time.Hour, nil, nil)
 
 	result := runTimeSyncOnce(nil, "ntp.aliyun.com")
 	if ok, _ := result["ok"].(bool); ok {

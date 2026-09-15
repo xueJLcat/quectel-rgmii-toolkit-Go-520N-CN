@@ -18,19 +18,8 @@ jobs:
           go-version-file: go-build/simpleadmin-go/go.mod
           cache: false
 
-      - name: 安装 Node（前端模块装配冒烟测试用）
-        uses: actions/setup-node@v4
-        with:
-          node-version: '20'
-
       - name: 格式检查、静态分析与单元测试
         run: make fmt-check vet test
-
-      - name: 前端样式构建一致性检查（Tailwind）
-        run: make css-check
-
-      - name: 前端模块装配冒烟测试
-        run: make smoke
 
       - name: 交叉编译 ARM 与 Windows 产物
         run: make all
@@ -48,3 +37,48 @@ jobs:
           name: simpleadmin-httpd-windows-amd64
           path: windows-test/bin/simpleadmin-httpd-windows-amd64.exe
           if-no-files-found: error
+
+  frontend:
+    name: Frontend Build & Test
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: development/simpleadmin/frontend-react
+    steps:
+      - name: 检出代码
+        uses: actions/checkout@v4
+
+      - name: 安装 Go（版本取自 go.mod；Playwright webServer 构建 Go 二进制用）
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go-build/simpleadmin-go/go.mod
+          cache: false
+
+      - name: 安装 Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: 安装前端依赖
+        run: npm ci --no-audit --no-fund
+
+      - name: 类型检查
+        run: npm run typecheck
+
+      - name: Lint
+        run: npm run lint
+
+      - name: 前端单元测试（vitest）
+        run: npm test
+
+      - name: 构建前端产物（Vite）
+        run: npm run build
+
+      - name: 体积预算闸门（检查构建产物 dist）
+        run: node scripts/check-size.mjs --dist dist
+
+      - name: 安装 Playwright Chromium
+        run: npx playwright install --with-deps chromium
+
+      - name: 前端 E2E 测试（Playwright）
+        run: npx playwright test

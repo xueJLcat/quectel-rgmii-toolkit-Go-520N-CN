@@ -8,8 +8,10 @@ import (
 	"io"
 	"log"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -18,19 +20,77 @@ import (
 type smsWebhookConfig struct {
 	Enabled bool   `json:"enabled"`
 	URL     string `json:"url"`
+	// Method 请求方式:POST(缺省)/GET/PUT。GET 不带请求体,载荷字段改为
+	// 附加到 URL 查询参数,Template 不生效。
+	Method string `json:"method,omitempty"`
+	// Headers 自定义请求头,每行一条 "Name: Value",空行忽略;
+	// 显式设置 Content-Type 时覆盖缺省的 application/json。
+	Headers string `json:"headers,omitempty"`
+	// TimeoutSec 单次请求超时秒数,0/缺省为 10,允许 1-120。
+	TimeoutSec int `json:"timeoutSec,omitempty"`
+	// Template JSON 载荷模板,占位符 {sender}/{date}/{text}/{index}/{storage}
+	// 以 JSON 转义后的字段值替换;空 = 内置缺省载荷(五字段 JSON 对象)。
+	Template string `json:"template,omitempty"`
+}
+
+const (
+	smsWebhookDefaultTimeoutSec = 10
+	smsWebhookMaxTimeoutSec     = 120
+)
+
+// smsWebhookTemplateKeys 模板占位符名(单花括号形态,与前端校验口径一致)。
+var smsWebhookTemplateKeys = []string{"sender", "date", "text", "index", "storage"}
+
+// normalizeSMSWebhookMethod 归一化请求方式:未知/空缺省 POST。
+func normalizeSMSWebhookMethod(method string) string {
+	switch strings.ToUpper(strings.TrimSpace(method)) {
+	case "GET":
+		return "GET"
+	case "PUT":
+		return "PUT"
+	default:
+		return "POST"
+	}
+}
+
+// smsWebhookEffectiveTimeoutSec 返回生效的单次请求超时秒数(越界回落缺省)。
+func smsWebhookEffectiveTimeoutSec(cfg smsWebhookConfig) int {
+	if cfg.TimeoutSec >= 1 && cfg.TimeoutSec <= smsWebhookMaxTimeoutSec {
+		return cfg.TimeoutSec
+	}
+	return smsWebhookDefaultTimeoutSec
 }
 
 var (
 	smsWebhookMu          sync.Mutex
 	smsWebhookHighWater   = map[string]int{}
 	smsWebhookInitialized = map[string]bool{}
+	// smsWebhookFreedSlots 记录成功删除的 (存储 → 索引集合):模块会把新
+	// 短信写入被删空的低索引槽位,高水位机制对"索引 ≤ 高水位的新消息"
+	// 无能为力(回绕启发式只在列表最大索引变小时触发),不登记则部分删除后
+	// 复用槽位的新短信永久漏推。槽位后续出现消息时按新到达补发一次并移除
+	// 登记(宁可重复,不可漏报)。受 smsWebhookMu 保护,登记方须持
+	// smsWebhookScanMu 与扫描串行。
+	smsWebhookFreedSlots = map[string]map[int]bool{}
 )
+
+// smsWebhookScanMu 把"拉取短信列表 → 推进高水位"的整个扫描串行化。
+// 拉取发生在 smsWebhookMu 之外(慢操作不占状态锁),页面强制刷新与后台
+// 轮询并发交错时,持较旧快照的一方可能在较新快照推进水位之后才执行
+// notify,旧快照的 currentMax 低于高水位会触发回绕启发式把水位拉低,
+// 造成重复推送(且下一轮扫描会把最新消息再推一次)。页面 list/list_meta
+// (scanSMSListWithWebhookNotify)与后台轮询(smsWebhookPollTick)共用本锁。
+var smsWebhookScanMu sync.Mutex
+
+// smsMaxSendSegments 是单条长短信的段数上限(见 sendSMSBusiness 的说明)。
+const smsMaxSendSegments = 10
 
 // smsWebhookPost 可注入，便于测试替换为记录器，不产生真实网络请求
 var smsWebhookPost = defaultSMSWebhookPost
 
 // smsWebhookRetryDelays 投递失败后的重试间隔序列，总尝试次数为 len+1。
-// 声明为包级变量以便测试注入缩短间隔；生产值为约 2s、8s。
+// Webhook 与 Server酱 两条转发通道共用。声明为包级变量以便测试注入缩短
+// 间隔；生产值为约 2s、8s。
 var smsWebhookRetryDelays = []time.Duration{2 * time.Second, 8 * time.Second}
 
 // smsWebhookPollInterval 后台轮询器主动拉取短信列表的间隔。
@@ -57,8 +117,8 @@ var smsWebhookPollFetchDual = func(s *simpleAdminServer) (map[string]any, map[st
 	return s.fetchSMSListDualStorage(false)
 }
 
-// smsWebhookPoller 生命周期状态：轮询循环仅在配置启用且 URL 非空时运行，
-// 关闭开关后立即停止，不保留空转的常驻循环。
+// smsWebhookPoller 生命周期状态：轮询循环仅在任一转发通道启用且配置完整时
+// 运行，全部关闭后立即停止，不保留空转的常驻循环。
 var (
 	smsWebhookPollerMu   sync.Mutex
 	smsWebhookPollerStop chan struct{}
@@ -89,6 +149,20 @@ func writeSMSWebhookConfig(cfg smsWebhookConfig) error {
 	if cfg.URL != "" && !strings.HasPrefix(cfg.URL, "http://") && !strings.HasPrefix(cfg.URL, "https://") {
 		return fmt.Errorf("webhook url must start with http:// or https://")
 	}
+	method := strings.ToUpper(strings.TrimSpace(cfg.Method))
+	if method != "" && method != "POST" && method != "GET" && method != "PUT" {
+		return fmt.Errorf("webhook method must be POST, GET or PUT")
+	}
+	cfg.Method = method
+	if cfg.TimeoutSec < 0 || cfg.TimeoutSec > smsWebhookMaxTimeoutSec {
+		return fmt.Errorf("webhook timeoutSec must be between 1 and %d (0 = default %d)", smsWebhookMaxTimeoutSec, smsWebhookDefaultTimeoutSec)
+	}
+	if _, err := parseSMSWebhookHeaders(cfg.Headers); err != nil {
+		return err
+	}
+	if err := validateSMSWebhookTemplate(cfg.Template); err != nil {
+		return err
+	}
 	data, err := json.MarshalIndent(cfg, "", "  ")
 	if err != nil {
 		return err
@@ -98,9 +172,142 @@ func writeSMSWebhookConfig(cfg smsWebhookConfig) error {
 	return atomicWriteFile(smsWebhookConfigPath(), data, 0600)
 }
 
-func defaultSMSWebhookPost(url string, body []byte) error {
-	client := &http.Client{Timeout: 10 * time.Second}
-	resp, err := client.Post(url, "application/json", bytes.NewReader(body))
+// parseSMSWebhookHeaders 解析自定义请求头文本(每行 "Name: Value",空行忽略)。
+// 任一行缺少冒号或名字为空即整体拒绝,防止把半截配置带上生产请求。
+func parseSMSWebhookHeaders(raw string) (map[string]string, error) {
+	headers := map[string]string{}
+	for i, line := range strings.Split(raw, "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+		name, value, found := strings.Cut(line, ":")
+		name = strings.TrimSpace(name)
+		if !found || name == "" || strings.ContainsAny(name, " \t") {
+			return nil, fmt.Errorf("请求头第 %d 行格式不正确，应为 Name: Value", i+1)
+		}
+		headers[name] = strings.TrimSpace(value)
+	}
+	return headers, nil
+}
+
+// smsWebhookEscapeJSON 返回字符串的 JSON 转义形态(不含外层引号),供模板
+// 占位符替换:模板中 "{text}" 位于引号内时,内容里的引号/换行/控制字符
+// 转义后仍保持整体为合法 JSON。
+func smsWebhookEscapeJSON(value string) string {
+	encoded, err := json.Marshal(value)
+	if err != nil {
+		return ""
+	}
+	return string(encoded[1 : len(encoded)-1])
+}
+
+// renderSMSWebhookBody 生成请求体:模板为空时用内置缺省载荷(五字段 JSON
+// 对象);否则把占位符替换为 JSON 转义后的字段值({index} 替换为十进制
+// 数字,引号内外均合法)。
+func renderSMSWebhookBody(template string, payload map[string]any) []byte {
+	if strings.TrimSpace(template) == "" {
+		body, err := json.Marshal(payload)
+		if err != nil {
+			return []byte("{}")
+		}
+		return body
+	}
+	rendered := template
+	for _, key := range smsWebhookTemplateKeys {
+		value := payload[key]
+		replacement := smsWebhookEscapeJSON(fmt.Sprint(value))
+		if key == "index" {
+			if index, ok := value.(int); ok {
+				replacement = strconv.Itoa(index)
+			}
+		}
+		rendered = strings.ReplaceAll(rendered, "{"+key+"}", replacement)
+	}
+	return []byte(rendered)
+}
+
+// smsWebhookTemplateSample 模板校验用样例载荷:文本刻意含引号/反斜杠/换行,
+// 验证转义路径;渲染结果必须是合法 JSON 才允许保存。
+var smsWebhookTemplateSample = map[string]any{
+	"sender":  "+8613800000000",
+	"date":    "26/01/02,03:04:05+32",
+	"text":    "样例 \"引号\" \\反斜杠\\ \n换行",
+	"index":   0,
+	"storage": "ME",
+}
+
+func validateSMSWebhookTemplate(template string) error {
+	if strings.TrimSpace(template) == "" {
+		return nil
+	}
+	if !json.Valid(renderSMSWebhookBody(template, smsWebhookTemplateSample)) {
+		return fmt.Errorf("模板替换占位符后不是合法 JSON")
+	}
+	return nil
+}
+
+// smsWebhookRequest 描述一次 webhook 投递,测试注入点 smsWebhookPost 的入参。
+type smsWebhookRequest struct {
+	Method  string
+	URL     string
+	Headers map[string]string
+	Body    []byte
+	Timeout time.Duration
+}
+
+// buildSMSWebhookRequest 按配置与载荷组装投递请求:GET 把五个缺省字段附加为
+// URL 查询参数(不带请求体,模板不生效);POST/PUT 用模板(或缺省载荷)作 JSON 体。
+func buildSMSWebhookRequest(cfg smsWebhookConfig, payload map[string]any) (smsWebhookRequest, error) {
+	headers, err := parseSMSWebhookHeaders(cfg.Headers)
+	if err != nil {
+		return smsWebhookRequest{}, err
+	}
+	method := normalizeSMSWebhookMethod(cfg.Method)
+	rq := smsWebhookRequest{
+		Method:  method,
+		URL:     cfg.URL,
+		Headers: headers,
+		Timeout: time.Duration(smsWebhookEffectiveTimeoutSec(cfg)) * time.Second,
+	}
+	if method == "GET" {
+		parsed, err := url.Parse(cfg.URL)
+		if err != nil {
+			return smsWebhookRequest{}, err
+		}
+		query := parsed.Query()
+		for _, key := range smsWebhookTemplateKeys {
+			query.Set(key, fmt.Sprint(payload[key]))
+		}
+		parsed.RawQuery = query.Encode()
+		rq.URL = parsed.String()
+		return rq, nil
+	}
+	rq.Body = renderSMSWebhookBody(cfg.Template, payload)
+	return rq, nil
+}
+
+func defaultSMSWebhookPost(rq smsWebhookRequest) error {
+	timeout := rq.Timeout
+	if timeout <= 0 {
+		timeout = smsWebhookDefaultTimeoutSec * time.Second
+	}
+	client := &http.Client{Timeout: timeout}
+	var body io.Reader
+	if len(rq.Body) > 0 {
+		body = bytes.NewReader(rq.Body)
+	}
+	req, err := http.NewRequest(rq.Method, rq.URL, body)
+	if err != nil {
+		return err
+	}
+	for name, value := range rq.Headers {
+		req.Header.Set(name, value)
+	}
+	if len(rq.Body) > 0 && req.Header.Get("Content-Type") == "" {
+		req.Header.Set("Content-Type", "application/json")
+	}
+	resp, err := client.Do(req)
 	if err != nil {
 		return err
 	}
@@ -133,14 +340,19 @@ func smsWebhookMaxIndex(messages []map[string]any) (maxIndex int, found bool) {
 	return maxIndex, found
 }
 
-// deliverSMSWebhook 投递一条 webhook 通知：单次请求超时/非 2xx 均视为失败，
-// 失败后按 smsWebhookRetryDelays 重试，共尝试 len(smsWebhookRetryDelays)+1 次；
-// 全部失败时返回含尝试次数的错误。重试在调用方（后台 goroutine）内完成。
-func deliverSMSWebhook(url string, body []byte) error {
+// deliverSMSWebhook 按配置投递一条 webhook 通知:请求组装失败(手工改坏的
+// 请求头/模板)直接返回错误;单次请求超时/非 2xx 均视为失败,失败后按
+// smsWebhookRetryDelays 重试,共尝试 len(smsWebhookRetryDelays)+1 次;
+// 全部失败时返回含尝试次数的错误。重试在调用方(后台 goroutine)内完成。
+func deliverSMSWebhook(cfg smsWebhookConfig, payload map[string]any) error {
+	rq, err := buildSMSWebhookRequest(cfg, payload)
+	if err != nil {
+		return err
+	}
 	attempts := len(smsWebhookRetryDelays) + 1
 	var lastErr error
 	for i := 0; i < attempts; i++ {
-		if lastErr = smsWebhookPost(url, body); lastErr == nil {
+		if lastErr = smsWebhookPost(rq); lastErr == nil {
 			return nil
 		}
 		if i < len(smsWebhookRetryDelays) {
@@ -176,7 +388,9 @@ func notifyNewSMSByWebhook(messages []map[string]any, scanValid bool) {
 	notifyNewSMSByWebhookStorages(messages, validStorages)
 }
 
-// notifyNewSMSByWebhookStorages 按存储独立的有效性推进高水位并投递通知。
+// notifyNewSMSByWebhookStorages 按存储独立的有效性推进高水位,并把新到达
+// 消息投递到全部已启用的转发通道(Webhook 与 Server酱,各自独立异步重试)。
+// 高水位扫描为通道共享:任一通道启用即推进,两通道看到的"新到达"完全一致。
 // validStorages[storage] 为 true 表示该存储本次被真实有效地扫描过:即使其
 // 收件箱为空(无消息)也要纳入 scanned 以建立基线。关键修复:ME 是否被覆盖
 // 只能以 ME 自身应答有效性为准,不能用"ME 或 SM 任一有效"的整体有效性——
@@ -184,12 +398,17 @@ func notifyNewSMSByWebhook(messages []map[string]any, scanValid bool) {
 // (高水位 -1),随后首次真正的 ME 有效扫描会把整个存量收件箱全部当成新
 // 到达逐条推送(全量误通知)。
 func notifyNewSMSByWebhookStorages(messages []map[string]any, validStorages map[string]bool) {
-	cfg, err := readSMSWebhookConfig()
-	if err != nil {
-		log.Printf("读取短信 webhook 配置失败: %v", err)
-		return
+	webhookCfg, webhookErr := readSMSWebhookConfig()
+	if webhookErr != nil {
+		log.Printf("读取短信 webhook 配置失败: %v", webhookErr)
 	}
-	if !cfg.Enabled || cfg.URL == "" {
+	serverChanCfg, serverChanErr := readSMSServerChanConfig()
+	if serverChanErr != nil {
+		log.Printf("读取短信 Server酱 配置失败: %v", serverChanErr)
+	}
+	webhookActive := webhookErr == nil && webhookCfg.Enabled && webhookCfg.URL != ""
+	serverChanActive := serverChanErr == nil && serverChanCfg.Enabled && serverChanCfg.SendKey != ""
+	if !webhookActive && !serverChanActive {
 		return
 	}
 
@@ -220,16 +439,21 @@ func notifyNewSMSByWebhookStorages(messages []map[string]any, validStorages map[
 				"index":   newIndexes[i],
 				"storage": storage,
 			}
-			body, err := json.Marshal(payload)
-			if err != nil {
-				log.Printf("短信 webhook 消息序列化失败: %v", err)
-				continue
+			if webhookActive {
+				go func(payload map[string]any) {
+					if err := deliverSMSWebhook(webhookCfg, payload); err != nil {
+						log.Printf("短信 webhook 通知失败（重试已用尽）: %v", err)
+					}
+				}(payload)
 			}
-			go func(body []byte) {
-				if err := deliverSMSWebhook(cfg.URL, body); err != nil {
-					log.Printf("短信 webhook 通知失败（重试已用尽）: %v", err)
-				}
-			}(body)
+			if serverChanActive {
+				go func(payload map[string]any, sendKey string) {
+					title, desp := buildServerChanSMSMessage(payload)
+					if err := deliverSMSServerChan(sendKey, title, desp); err != nil {
+						log.Printf("短信 Server酱 推送失败（重试已用尽）: %v", err)
+					}
+				}(payload, serverChanCfg.SendKey)
+			}
 		}
 	}
 }
@@ -240,6 +464,44 @@ func smsWebhookStorage(msg map[string]any) string {
 		return "SM"
 	}
 	return "ME"
+}
+
+// resetSMSWebhookState 在存储被整体清空(delete_all 成功)后重置该存储的
+// webhook 水位:高水位置 -1 且保持已初始化,清空后到达的任何短信(索引 ≥0)
+// 都高于水位、正常推送。不重置时旧高水位会让模块复用低索引的新短信被
+// 回绕启发式吞掉——只有最大索引那条补发,更低索引的永久漏推,违反
+// "宁可重复一次,不可漏报"。只能对清空成功的存储调用:仍有存量短信的
+// 存储被重置会导致下一轮扫描全量重推。
+func resetSMSWebhookState(storages ...string) {
+	smsWebhookMu.Lock()
+	defer smsWebhookMu.Unlock()
+	for _, storage := range storages {
+		smsWebhookHighWater[storage] = -1
+		smsWebhookInitialized[storage] = true
+		// 整体清空后任何索引都高于水位(-1),释放槽位登记已无意义,清除。
+		delete(smsWebhookFreedSlots, storage)
+	}
+}
+
+// markSMSWebhookSlotsFreed 登记成功删除的槽位(令牌形态 "<存储>:<索引>",
+// 与 parseSMSDeleteToken 一致),供下轮扫描把复用该槽位的新短信判为新到达。
+// 只登记确认删除成功的索引:失败的删除槽位仍被旧消息占用,登记会把存量
+// 消息误判为新到达重复推送。调用方必须持有 smsWebhookScanMu(与扫描串行,
+// 防止在途扫描带着删除前的旧快照交错推进状态)。
+func markSMSWebhookSlotsFreed(tokens []string) {
+	smsWebhookMu.Lock()
+	defer smsWebhookMu.Unlock()
+	for _, token := range tokens {
+		storage, index := parseSMSDeleteToken(token)
+		idx, err := strconv.Atoi(index)
+		if err != nil {
+			continue
+		}
+		if smsWebhookFreedSlots[storage] == nil {
+			smsWebhookFreedSlots[storage] = map[int]bool{}
+		}
+		smsWebhookFreedSlots[storage][idx] = true
+	}
 }
 
 // smsWebhookAdvanceLocked 推进单个存储的高水位并返回新到达消息。
@@ -278,10 +540,12 @@ func smsWebhookAdvanceLocked(storage string, messages []map[string]any, scanVali
 	newMessages := []map[string]any{}
 	newIndexes := []int{}
 	if !firstCall {
+		freed := smsWebhookFreedSlots[storage]
 		for _, msg := range messages {
 			indices := toIntSlice(msg["indices"])
 			msgMax := -1
 			isNew := false
+			freedHit := false
 			for _, idx := range indices {
 				if idx > msgMax {
 					msgMax = idx
@@ -289,10 +553,23 @@ func smsWebhookAdvanceLocked(storage string, messages []map[string]any, scanVali
 				if idx > highWater {
 					isNew = true
 				}
+				// 已删除槽位被模块复用存放新短信:索引虽不高于高水位,
+				// 命中登记即按新到达处理(见 smsWebhookFreedSlots)。
+				if freed[idx] {
+					isNew = true
+					freedHit = true
+				}
 			}
 			if isNew && msgMax >= 0 {
 				newMessages = append(newMessages, msg)
 				newIndexes = append(newIndexes, msgMax)
+				if freedHit {
+					// 槽位只补发一次:推送后清除登记,该索引的后续消息
+					// 回到高水位语义。
+					for _, idx := range indices {
+						delete(freed, idx)
+					}
+				}
 			}
 		}
 	}
@@ -300,15 +577,26 @@ func smsWebhookAdvanceLocked(storage string, messages []map[string]any, scanVali
 	return newMessages, newIndexes
 }
 
-// syncSMSWebhookPoller 按配置同步轮询器运行状态：启用且 URL 非空时启动
-// （幂等），关闭或 URL 清空时停止循环（幂等）。启动时与保存配置后调用。
-func syncSMSWebhookPoller(s *simpleAdminServer) {
-	cfg, err := readSMSWebhookConfig()
-	if err != nil {
+// smsForwardAnyChannelActive 任一转发通道(Webhook 已填地址 / Server酱 已填
+// SendKey)处于启用状态即返回 true;配置读取失败按未启用处理并记日志。
+func smsForwardAnyChannelActive() bool {
+	if cfg, err := readSMSWebhookConfig(); err != nil {
 		log.Printf("读取短信 webhook 配置失败: %v", err)
-		return
+	} else if cfg.Enabled && cfg.URL != "" {
+		return true
 	}
-	if cfg.Enabled && cfg.URL != "" {
+	if cfg, err := readSMSServerChanConfig(); err != nil {
+		log.Printf("读取短信 Server酱 配置失败: %v", err)
+	} else if cfg.Enabled && cfg.SendKey != "" {
+		return true
+	}
+	return false
+}
+
+// syncSMSWebhookPoller 按配置同步轮询器运行状态：任一转发通道启用且配置
+// 完整时启动（幂等），全部关闭时停止循环（幂等）。启动时与保存配置后调用。
+func syncSMSWebhookPoller(s *simpleAdminServer) {
+	if smsForwardAnyChannelActive() {
 		startSMSWebhookPoller(s)
 		return
 	}
@@ -352,21 +640,20 @@ func smsWebhookPollerRunning() bool {
 	return smsWebhookPollerStop != nil
 }
 
-// smsWebhookPollTick 执行一次后台轮询：轮询器仅在启用时运行，此处仍复查
-// 配置作为关闭竞态下的防御——未启用或未配置 URL 时直接跳过，不产生任何
-// AT 流量；否则经双存储读取拉取并解析短信列表，复用
+// smsWebhookPollTick 执行一次后台轮询：轮询器仅在任一转发通道启用时运行，
+// 此处仍复查配置作为关闭竞态下的防御——全部通道未启用时直接跳过，不产生
+// 任何 AT 流量；否则经双存储读取拉取并解析短信列表，复用
 // notifyNewSMSByWebhookStorages 的逐存储高水位判断。空应答（保护期
 // pending、运行器错误文本）解析为空列表且该存储有效性为假，高水位逻辑保持
 // 不变不消耗首扫。
 func smsWebhookPollTick(s *simpleAdminServer) {
-	cfg, err := readSMSWebhookConfig()
-	if err != nil {
-		log.Printf("读取短信 webhook 配置失败: %v", err)
+	if !smsForwardAnyChannelActive() {
 		return
 	}
-	if !cfg.Enabled || cfg.URL == "" {
-		return
-	}
+	// 拉取+通知整体与页面扫描串行,防旧快照后推进水位造成回退重推
+	// (见 smsWebhookScanMu)。
+	smsWebhookScanMu.Lock()
+	defer smsWebhookScanMu.Unlock()
 	data, validStorages := smsWebhookPollFetchDual(s)
 	notifyNewSMSByWebhookStorages(smsDataMessages(data), validStorages)
 }
@@ -390,6 +677,10 @@ func currentSMSWebhookStatus() map[string]any {
 	return map[string]any{
 		"enabled":           cfg.Enabled,
 		"url":               cfg.URL,
+		"method":            normalizeSMSWebhookMethod(cfg.Method),
+		"headers":           cfg.Headers,
+		"timeoutSec":        smsWebhookEffectiveTimeoutSec(cfg),
+		"template":          cfg.Template,
 		"lastNotifiedIndex": lastIndex,
 	}
 }

@@ -7,6 +7,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -564,13 +565,24 @@ var (
 	nr5gLockVerifyDelay = 3 * time.Second
 )
 
+// cellLockMu 把守护锁定的"下发锁定 → 等待注册 → 校验 → 失败解锁 → 下一
+// 候选"多步事务整体互斥:AT 全局文件锁只保证单条命令原子,并发锁定请求
+// (WS 网关每条消息独立协程分发,前端重试/多管理员同时操作都会触发)会在
+// 8 秒校验窗口内交错——A 校验读到的注册状态可能是 B 刚下发的锁造成的
+// (误报成功),A 失败解锁会把 B 刚设的锁一并解掉(误解锁)。与
+// macBindMu/dnsUpstreamMu 的事务互斥设计对齐。
+var cellLockMu sync.Mutex
+
 // lockNR5GCellGuarded 按候选 SCS 逐个尝试锁定 NR5G 小区,锁定成功后
 // 必须校验注册状态,未注册立即自动解锁——防止 scs 不匹配把设备钉死在
 // 无法同步的小区导致断网(本次实机事故:band 1 小区实际 30kHz,
 // 猜 15 即断网;且本机 QENG servingcell 的 scs 字段恒为 "-",无法预读,
-// 因此所有 NR5G 小区锁都必须带此保护)。
+// 因此所有 NR5G 小区锁都必须带此保护)。整个候选序列持 cellLockMu 串行,
+// 等待窗口内其他锁定请求不得插入(见 cellLockMu 注释)。
 // 成功返回 (锁定响应, 所用 scs, true);全部候选失败返回 ("", "", false)。
 func (s *simpleAdminServer) lockNR5GCellGuarded(pci, arfcn, band string, scsCandidates []string) (resp string, scsUsed string, ok bool) {
+	cellLockMu.Lock()
+	defer cellLockMu.Unlock()
 	for _, scs := range scsCandidates {
 		lockResp := s.runPageAction(fmt.Sprintf(`AT+QNWLOCK="common/5g",%s,%s,%s,%s`, pci, arfcn, scs, band))
 		if !atResponseOK(lockResp) {
@@ -687,20 +699,26 @@ func (s *simpleAdminServer) lockScannedCells(r *http.Request) (string, error) {
 		return resp, nil
 	}
 	if mode == "LTE Only" {
-		earfcns := requestValues(r, "earfcn")
-		pcis := requestValues(r, "pci")
-		if len(earfcns) == 1 && strings.Contains(earfcns[0], ",") {
-			earfcns = strings.Split(earfcns[0], ",")
-		}
-		if len(pcis) == 1 && strings.Contains(pcis[0], ",") {
-			pcis = strings.Split(pcis[0], ",")
-		}
+		// 每个参数值都按逗号无条件展开:多值与分隔串混用(earfcn=1,2&
+		// earfcn=3)时旧实现不拆分 "1,2",被 stripNonDigits 洗成 "12" 后
+		// 静默锁定错误频点——错值落在合法 EARFCN 范围内时最危险,设备可能
+		// 钉死在无小区频点上断网。
+		earfcns := splitRequestListValues(requestValues(r, "earfcn"), ",")
+		pcis := splitRequestListValues(requestValues(r, "pci"), ",")
 		if len(earfcns) == 0 || len(earfcns) != len(pcis) || len(earfcns) > 10 {
 			return "", fmt.Errorf("invalid lte cell parameters")
 		}
 		parts := []string{strconv.Itoa(len(earfcns))}
 		for i := range earfcns {
-			parts = append(parts, stripNonDigits(earfcns[i]), stripNonDigits(pcis[i]))
+			earfcn := stripNonDigits(earfcns[i])
+			pci := stripNonDigits(pcis[i])
+			// 拆分后的空段必须拒绝:旧实现直接拼接,向固件下发
+			// `...,2,1850,1,,2` 形态的畸形命令(NR5G 路径与 lockLTEManual
+			// 均有判空,LTE Alone 此前遗漏)。
+			if earfcn == "" || pci == "" {
+				return "", fmt.Errorf("invalid lte cell parameters")
+			}
+			parts = append(parts, earfcn, pci)
 		}
 		return s.runPageAction(`AT+QNWLOCK="common/4g",` + strings.Join(parts, ",")), nil
 	}
@@ -718,21 +736,32 @@ func (s *simpleAdminServer) saveNetworkSettings(r *http.Request) (string, error)
 	return s.runPageAction("AT" + strings.Join(commands, ";")), nil
 }
 
+// apnMaxLength 是 APN 长度上限(Quectel 模块 CGDCONT 允许的 APN 长度)。
+const apnMaxLength = 100
+
 // networkSettingsCommands 拼装保存网络设置的写命令序列。
 // APN 为空时跳过 CGDCONT 重写,保留模块当前 APN(前端仅改 PDP 类型时提交空 APN);
+// APN 非空时必须是合法字符集([A-Za-z0-9._-])且不超过 apnMaxLength:非法输入
+// 明确拒绝而不是静默剥离——旧实现把全非法字符(如 "###")清洗成空 APN 后照样
+// 下发 +CGDCONT=1,"IPV4V6",""(空 APN 写入固件,PDP 激活异常),含空格/中文的
+// APN 被无声改写,用户无从得知;
 // 其余参数(mode_pref/nr5g_disable_mode)照常处理。
 func networkSettingsCommands(pdpType, apn, modePref, nrDisableMode string) ([]string, error) {
 	commands := []string{}
 	pdp := strings.ToUpper(strings.TrimSpace(pdpType))
 	apn = strings.TrimSpace(apn)
 	if apn != "" {
+		cleaned := sanitizeAPN(apn)
+		if cleaned != apn || cleaned == "" || len(cleaned) > apnMaxLength {
+			return nil, fmt.Errorf("invalid apn")
+		}
 		if pdp == "" {
 			pdp = "IPV4V6"
 		}
 		if !map[string]bool{"IP": true, "IPV6": true, "IPV4V6": true}[pdp] {
 			return nil, fmt.Errorf("invalid pdp type")
 		}
-		commands = append(commands, fmt.Sprintf(`+CGDCONT=1,"%s","%s"`, pdp, sanitizeAPN(apn)))
+		commands = append(commands, fmt.Sprintf(`+CGDCONT=1,"%s","%s"`, pdp, cleaned))
 	}
 	mode := strings.TrimSpace(modePref)
 	if mode != "" {
@@ -747,10 +776,10 @@ func networkSettingsCommands(pdpType, apn, modePref, nrDisableMode string) ([]st
 
 func (s *simpleAdminServer) lockLTEManual(r *http.Request) (string, error) {
 	cellNum := stripNonDigits(requestValue(r, "cellNum"))
-	values := requestValues(r, "pairs")
-	if len(values) == 1 && strings.Contains(values[0], ";") {
-		values = strings.Split(values[0], ";")
-	}
+	// 每个参数值都按分号无条件展开:多值与分隔符混用时旧实现不拆分,
+	// "1850,1;1900" 的尾段被 stripNonDigits 洗成 (1850, 11900),
+	// 静默锁定错误小区。
+	values := splitRequestListValues(requestValues(r, "pairs"), ";")
 	pairs := []string{}
 	for _, p := range values {
 		fields := strings.Split(p, ",")

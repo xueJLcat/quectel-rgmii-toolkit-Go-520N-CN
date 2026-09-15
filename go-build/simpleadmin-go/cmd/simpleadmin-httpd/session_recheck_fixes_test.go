@@ -80,7 +80,9 @@ func TestWebSocketPublicEndpointStillServedAfterSessionInvalidated(t *testing.T)
 }
 
 // TestLoginStaticAssetsServedWithoutAuth 验证登录页静态资源未认证时不被 302 到登录页:
-// /css/、/fonts/、/favicon.ico 放行;同时守护放行面没有扩大——/js/ 等其它资源仍需登录。
+// /css/、/fonts/、/assets/、/favicon.ico 放行(/assets/ 为 React 前端 Vite 内容寻址
+// 产物,登录页脚本与样式位于其中,拦截会白屏);同时守护放行面没有扩大——
+// HTML 入口(/ 与 /index.html)仍需登录。
 func TestLoginStaticAssetsServedWithoutAuth(t *testing.T) {
 	staticDir := e2eStaticDir(t)
 	dir := t.TempDir()
@@ -91,7 +93,12 @@ func TestLoginStaticAssetsServedWithoutAuth(t *testing.T) {
 	srv := &simpleAdminServer{cfg: serverConfig{authFile: authFile, staticDir: staticDir}}
 	handler := srv.routes()
 
-	for _, path := range []string{"/css/tailwind.css", "/fonts/poppins-v21-400-latin.woff2", "/favicon.ico"} {
+	// 构建产物文件名带内容哈希:动态取 www/assets 中一个真实文件参与断言
+	assetEntries, err := os.ReadDir(filepath.Join(staticDir, "assets"))
+	if err != nil || len(assetEntries) == 0 {
+		t.Fatalf("www/assets missing or empty: %v", err)
+	}
+	for _, path := range []string{"/css/Poppins.css", "/fonts/poppins-v21-400-latin.woff2", "/favicon.ico", "/assets/" + assetEntries[0].Name()} {
 		req := httptest.NewRequest(http.MethodGet, path, nil)
 		rr := httptest.NewRecorder()
 		handler.ServeHTTP(rr, req)
@@ -106,11 +113,13 @@ func TestLoginStaticAssetsServedWithoutAuth(t *testing.T) {
 		}
 	}
 
-	req := httptest.NewRequest(http.MethodGet, "/js/simpleadmin-api.js", nil)
-	rr := httptest.NewRecorder()
-	handler.ServeHTTP(rr, req)
-	if rr.Code != http.StatusSeeOther || !strings.Contains(rr.Header().Get("Location"), "/login.html") {
-		t.Fatalf("/js/simpleadmin-api.js = %d Location=%s, want redirect to login page", rr.Code, rr.Header().Get("Location"))
+	for _, protected := range []string{"/", "/index.html"} {
+		req := httptest.NewRequest(http.MethodGet, protected, nil)
+		rr := httptest.NewRecorder()
+		handler.ServeHTTP(rr, req)
+		if rr.Code != http.StatusSeeOther || !strings.Contains(rr.Header().Get("Location"), "/login.html") {
+			t.Fatalf("%s = %d Location=%s, want redirect to login page", protected, rr.Code, rr.Header().Get("Location"))
+		}
 	}
 }
 

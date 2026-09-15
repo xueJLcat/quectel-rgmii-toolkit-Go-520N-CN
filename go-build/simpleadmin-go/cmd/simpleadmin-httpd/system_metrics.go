@@ -16,7 +16,16 @@ type cpuTimesSnapshot struct {
 
 var systemMetricsMu sync.Mutex
 var lastCPUTimes cpuTimesSnapshot
+var lastCPUTimesAt time.Time
 var hasLastCPUTimes bool
+
+// cpuUsageBaselineMaxAge 是 CPU 增量基线的时效上限:基线只在被调用时刷新,
+// 长时间无人访问(如整夜关闭页面)后首次请求会以"距上次任意调用的整个
+// 区间平均值"冒充当前占用(夜间有后台突发时首屏显示接近 0% 的多日均值,
+// 或反之显示早已结束的高占用)。正常前端轮询(2-10 秒)恒低于上限不触发
+// 重测;超限丢弃陈旧基线,复用首次调用的 120ms 双采样路径重新测量。
+// 时效比较走 time.Since 的单调钟读数,不受 NTP 校时步进影响。
+const cpuUsageBaselineMaxAge = 15 * time.Second
 
 func systemResourceMetrics(mock bool) map[string]any {
 	if mock {
@@ -47,8 +56,9 @@ func currentCPUUsagePercent() int {
 		return 0
 	}
 
-	if !hasLastCPUTimes {
+	if !hasLastCPUTimes || time.Since(lastCPUTimesAt) > cpuUsageBaselineMaxAge {
 		lastCPUTimes = current
+		lastCPUTimesAt = time.Now()
 		hasLastCPUTimes = true
 		time.Sleep(120 * time.Millisecond)
 		if next, ok := readCPUTimesSnapshot(); ok {
@@ -60,11 +70,13 @@ func currentCPUUsagePercent() int {
 
 	if current.total < lastCPUTimes.total || current.idle < lastCPUTimes.idle {
 		lastCPUTimes = current
+		lastCPUTimesAt = time.Now()
 		return 0
 	}
 	totalDelta := current.total - lastCPUTimes.total
 	idleDelta := current.idle - lastCPUTimes.idle
 	lastCPUTimes = current
+	lastCPUTimesAt = time.Now()
 	if totalDelta == 0 || idleDelta > totalDelta {
 		return 0
 	}
@@ -92,7 +104,12 @@ func readCPUTimesSnapshot() (cpuTimesSnapshot, bool) {
 	}
 
 	var total uint64
-	for _, value := range values {
+	for i, value := range values {
+		// guest(第 8 列)与 guest_nice(第 9 列)内核已分别计入 user/nice,
+		// 全列求和会重复计账、低估占用率(htop 等工具求 total 均剔除该两列)。
+		if i == 8 || i == 9 {
+			continue
+		}
 		total += value
 	}
 	idle := values[3]

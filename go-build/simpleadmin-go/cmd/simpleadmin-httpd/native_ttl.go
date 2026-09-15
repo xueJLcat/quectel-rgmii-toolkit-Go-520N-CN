@@ -4,6 +4,7 @@
 package main
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"log"
@@ -11,7 +12,24 @@ import (
 	"os/exec"
 	"strconv"
 	"strings"
+	"sync"
+	"time"
 )
+
+// ttlIPTablesTimeout 单条 iptables/ip6tables 命令的执行上限:applySavedTTLAtStartup
+// 在 HTTP 监听前同步执行,iptables 罕见挂起(内核模块自动加载/锁等待)时
+// 不得无限阻塞整个启动。
+const ttlIPTablesTimeout = 10 * time.Second
+
+// runTTLIPTables 执行 TTL 相关的 iptables/ip6tables 命令:统一附加 -w
+// (等待 xtables 锁,厂商 QCMAP/防火墙脚本与本工具的防火墙页会并发操作
+// iptables,不带 -w 时锁竞争立即失败)与 context 超时。
+func runTTLIPTables(command string, args []string) ([]byte, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), ttlIPTablesTimeout)
+	defer cancel()
+	full := append([]string{"-w"}, args...)
+	return exec.CommandContext(ctx, command, full...).CombinedOutput()
+}
 
 const (
 	iptablesCommand  = "iptables"
@@ -42,10 +60,20 @@ func runTTLCommand(args []string) {
 			fmt.Println(err)
 			os.Exit(1)
 		}
-		lines, _ := applyNativeTTL(value, false)
+		// 应用失败必须以非零退出码结束:init/卸载/编排脚本按退出码判定
+		// 成败,恒 0 会把"规则没有生效"当成功继续后续步骤(HTTP 路径
+		// 已如实上报,CLI 路径对齐同一语义)。
+		lines, applied := applyNativeTTL(value, false)
 		printLines(lines)
+		if !applied {
+			os.Exit(1)
+		}
 	case "off", "stop":
-		printLines(setNativeTTL(0))
+		lines, ok := setNativeTTLWithStatus(0)
+		printLines(lines)
+		if !ok {
+			os.Exit(1)
+		}
 	case "status":
 		value, enabled := currentTTLValue()
 		fmt.Printf("enabled=%t ttl=%d\n", enabled, value)
@@ -87,10 +115,20 @@ func setNativeTTL(value int) []string {
 	return logs
 }
 
+// nativeTTLMu 保护"快照旧值→删旧规则→加新规则→持久化"的整体互斥:
+// WS 网关对每帧独立协程分发、directAPI 模式天然并发,两个并发 set_ttl
+// 交错会在 mangle 链同时残留两条托管规则(生效值由插入顺序决定)、
+// 状态文件与内核实际生效值背离、并发 -D 竞争让本应成功的请求误报失败。
+// 同类多步事务(firewallMu/macBindMu/dnsUpstreamMu/cellLockMu)均有互斥,
+// TTL 此前遗漏。CLI 子命令是独立进程,跨进程竞争由 iptables -w 兜底。
+var nativeTTLMu sync.Mutex
+
 // setNativeTTLWithStatus 与 setNativeTTL 相同,但额外返回规则是否成功应用
 // 并持久化,供 HTTP 接口如实上报成败(旧路径恒返回 200,前端无法感知
 // 应用失败)。
 func setNativeTTLWithStatus(value int) ([]string, bool) {
+	nativeTTLMu.Lock()
+	defer nativeTTLMu.Unlock()
 	logs, applied := applyNativeTTL(value, true)
 	if !applied {
 		return logs, false
@@ -104,6 +142,11 @@ func setNativeTTLWithStatus(value int) ([]string, bool) {
 
 func applyNativeTTL(value int, persistLog bool) ([]string, bool) {
 	logs := []string{"Applying TTL rules with Go native handler"}
+	// 删除前先快照内核中正在生效的托管规则值:删除成功而添加失败时
+	// (xtables 锁竞争/ip6tables 缺失等)按快照回滚,否则用户原本正常的
+	// TTL 改写被一次失败的"改值"静默摧毁——内核无规则、状态文件仍是旧值、
+	// UI 显示"已启用",三方分裂且开机自愈不会清理。
+	oldValue := currentManagedTTLValue()
 	removeLogs, removedAll := removeNativeTTLRules()
 	logs = append(logs, removeLogs...)
 	if !removedAll {
@@ -123,18 +166,24 @@ func applyNativeTTL(value int, persistLog bool) ([]string, bool) {
 	}
 
 	logs = append(logs, fmt.Sprintf("Enabling TTL with value: %d", value))
-	applied := true
-	for _, spec := range ttlRuleSpecs {
-		args := []string{"-t", "mangle", "-I", "POSTROUTING", "-o", "rmnet+", "-j", spec.target, spec.setFlag, strconv.Itoa(value)}
-		if out, err := exec.Command(spec.command, args...).CombinedOutput(); err != nil {
-			logs = append(logs, fmt.Sprintf("%s add failed: %v: %s", spec.command, err, strings.TrimSpace(string(out))))
-			applied = false
-			continue
-		}
-		logs = append(logs, fmt.Sprintf("%s rule added", spec.command))
-	}
+	addLogs, applied := addNativeTTLRules(value)
+	logs = append(logs, addLogs...)
 
 	if !applied {
+		// v4/v6 部分成功时先清掉本次已插入的规则,保证"失败 = 内核无本次
+		// 新规则"的确定语义(否则 v4 生效而状态上报"未启用")。
+		cleanLogs, _ := removeNativeTTLRules()
+		logs = append(logs, cleanLogs...)
+		// 再按快照值回滚此前正常生效的旧规则(尽力而为,失败明确告警)。
+		if oldValue > 0 {
+			restoreLogs, restored := addNativeTTLRules(oldValue)
+			logs = append(logs, restoreLogs...)
+			if restored {
+				logs = append(logs, fmt.Sprintf("rolled back to previous TTL value: %d", oldValue))
+			} else {
+				logs = append(logs, "WARNING: rollback to previous TTL value failed, managed rules may be missing")
+			}
+		}
 		logs = append(logs, "TTL rules not applied, ttlvalue not persisted")
 		return logs, false
 	}
@@ -144,6 +193,46 @@ func applyNativeTTL(value int, persistLog bool) ([]string, bool) {
 	return logs, true
 }
 
+// addNativeTTLRules 为 IPv4(TTL)与 IPv6(HL)各插入一条改值规则,
+// 返回日志与是否全部成功。
+func addNativeTTLRules(value int) ([]string, bool) {
+	var logs []string
+	ok := true
+	for _, spec := range ttlRuleSpecs {
+		args := []string{"-t", "mangle", "-I", "POSTROUTING", "-o", "rmnet+", "-j", spec.target, spec.setFlag, strconv.Itoa(value)}
+		if out, err := runTTLIPTables(spec.command, args); err != nil {
+			logs = append(logs, fmt.Sprintf("%s add failed: %v: %s", spec.command, err, strings.TrimSpace(string(out))))
+			ok = false
+			continue
+		}
+		logs = append(logs, fmt.Sprintf("%s rule added", spec.command))
+	}
+	return logs, ok
+}
+
+// currentManagedTTLValue 从内核 -S 列举中读取当前托管 IPv4 TTL 规则的值
+// (无托管规则或列举失败返回 0),作为"删后加失败"时的回滚目标。
+func currentManagedTTLValue() int {
+	out, err := runTTLIPTables(iptablesCommand, []string{"-t", "mangle", "-S", "POSTROUTING"})
+	if err != nil {
+		return 0
+	}
+	for _, line := range strings.Split(string(out), "\n") {
+		if _, matched := managedTTLDeleteArgs(line, "TTL", "--ttl-set"); !matched {
+			continue
+		}
+		fields := strings.Fields(line)
+		for i := 0; i+1 < len(fields); i++ {
+			if fields[i] == "--ttl-set" {
+				if v, err := strconv.Atoi(fields[i+1]); err == nil {
+					return v
+				}
+			}
+		}
+	}
+	return 0
+}
+
 // removeNativeTTLRules 清理内核中托管的 TTL/HL 规则,返回日志与是否全部成功。
 // 任一列表/删除命令失败都视为清理失败(内核可能残留规则),
 // 由调用方据此决定是否持久化新状态。
@@ -151,7 +240,7 @@ func removeNativeTTLRules() ([]string, bool) {
 	var logs []string
 	ok := true
 	for _, spec := range ttlRuleSpecs {
-		out, err := exec.Command(spec.command, "-t", "mangle", "-S", "POSTROUTING").CombinedOutput()
+		out, err := runTTLIPTables(spec.command, []string{"-t", "mangle", "-S", "POSTROUTING"})
 		if err != nil {
 			logs = append(logs, fmt.Sprintf("%s list failed: %v: %s", spec.command, err, strings.TrimSpace(string(out))))
 			ok = false
@@ -165,7 +254,7 @@ func removeNativeTTLRules() ([]string, bool) {
 				continue
 			}
 			cmdArgs := append([]string{"-t", "mangle"}, deleteArgs...)
-			if delOut, err := exec.Command(spec.command, cmdArgs...).CombinedOutput(); err != nil {
+			if delOut, err := runTTLIPTables(spec.command, cmdArgs); err != nil {
 				logs = append(logs, fmt.Sprintf("%s delete failed: %v: %s", spec.command, err, strings.TrimSpace(string(delOut))))
 				ok = false
 				continue

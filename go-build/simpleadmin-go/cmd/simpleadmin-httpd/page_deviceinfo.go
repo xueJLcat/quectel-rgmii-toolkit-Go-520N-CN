@@ -46,9 +46,19 @@ func parseDeviceInfoAT(raw string) map[string]any {
 	simStatusKnown := false
 	simInserted := false
 	simExplicitAbsent := false
+	// simFreshInserted 记录来自新鲜证据批(+QSIMSTAT?;+CPIN?,3 秒缓存)的
+	// "卡在位"结论。设备信息页 transcript 由三批独立缓存的应答拼接:静态批
+	// (CGMI;CGSN;QGMR;CIMI;ICCID;CNUM)缓存 10 分钟,无卡开机时 CIMI 的
+	// "+CME ERROR: 10" 会作为"成功响应"缓存下来;随后热插卡,新鲜批 3 秒内
+	// 就返回 QSIMSTAT=1/CPIN READY,但静态批的陈旧缺卡证据仍粘滞在
+	// simExplicitAbsent 上无条件压制正向证据,页面最长 10 分钟显示"未插卡"。
+	// 裁决规则:新鲜证据(短缓存的 QSIMSTAT/CPIN)优先于陈旧的文本类缺卡证据;
+	// 静态批里的陈旧 ICCID/IMSI 数字行不算新鲜证据(SIM 拔出后它们同样残留,
+	// 既有"absent 清 stale ICCID"语义必须保留)。
+	simFreshInserted := false
 	for _, line := range lines {
 		up := strings.ToUpper(line)
-		if strings.Contains(up, "SIM NOT INSERTED") || strings.Contains(up, "+CME ERROR: 10") || strings.Contains(up, "+CPIN: NOT INSERTED") {
+		if isSIMAbsentEvidence(up) {
 			simStatusKnown = true
 			simInserted = false
 			simExplicitAbsent = true
@@ -59,7 +69,9 @@ func parseDeviceInfoAT(raw string) map[string]any {
 			if len(parts) > 1 {
 				simStatusKnown = true
 				simInserted = strings.TrimSpace(parts[1]) == "1"
-				if !simInserted {
+				if simInserted {
+					simFreshInserted = true
+				} else {
 					simExplicitAbsent = true
 				}
 			}
@@ -71,7 +83,9 @@ func parseDeviceInfoAT(raw string) map[string]any {
 			// 口径一致:状态非空且非 NOT INSERTED 即判已插卡。
 			cpinState := strings.TrimSpace(strings.TrimPrefix(up, "+CPIN:"))
 			simInserted = cpinState != "" && cpinState != "NOT INSERTED"
-			if !simInserted {
+			if simInserted {
+				simFreshInserted = true
+			} else {
 				simExplicitAbsent = true
 			}
 		case strings.HasPrefix(up, "+CGSN:"):
@@ -84,19 +98,22 @@ func parseDeviceInfoAT(raw string) map[string]any {
 				simStatusKnown = true
 				simInserted = true
 			}
-		case strings.HasPrefix(line, `+QMAP: "LANIP"`):
+		// QMAP 记录用 isQMAPRecord 宽松匹配(容忍冒号后有无空格的固件
+		// 变体),并过滤 0.0.0.0/全零 v6 占位地址——与仪表盘同口径,
+		// 未拨号时不得把占位地址当作已分配地址展示(两页自相矛盾)。
+		case isQMAPRecord(line, "LANIP"):
 			parts := csvFields(strings.TrimPrefix(line, "+QMAP:"))
 			if len(parts) > 3 {
 				data["lanIp"] = parts[3]
 			}
-		case strings.HasPrefix(line, `+QMAP: "WWAN"`) && strings.Contains(line, `"IPV4"`):
+		case isQMAPRecord(line, "WWAN") && strings.Contains(line, `"IPV4"`):
 			parts := csvFields(strings.TrimPrefix(line, "+QMAP:"))
-			if len(parts) > 4 {
+			if len(parts) > 4 && parts[4] != "" && parts[4] != "0.0.0.0" {
 				data["wwanIpv4"] = parts[4]
 			}
-		case strings.HasPrefix(line, `+QMAP: "WWAN"`) && strings.Contains(line, `"IPV6"`):
+		case isQMAPRecord(line, "WWAN") && strings.Contains(line, `"IPV6"`):
 			parts := csvFields(strings.TrimPrefix(line, "+QMAP:"))
-			if len(parts) > 4 {
+			if len(parts) > 4 && parts[4] != "" && !isAllZeroV6(parts[4]) {
 				data["wwanIpv6"] = parts[4]
 			}
 		case strings.HasPrefix(up, "+CNUM:"):
@@ -144,6 +161,13 @@ func parseDeviceInfoAT(raw string) map[string]any {
 			simInserted = true
 			break
 		}
+	}
+	// 新鲜证据(QSIMSTAT=1/CPIN 有效状态)优先:清除静态批缓存里陈旧
+	// 文本类缺卡证据的粘滞,热插卡后页面立即恢复"已插卡"。
+	if simFreshInserted {
+		simExplicitAbsent = false
+		simInserted = true
+		simStatusKnown = true
 	}
 	if simExplicitAbsent || (simStatusKnown && !simInserted) {
 		data["simStatus"] = "未插卡"

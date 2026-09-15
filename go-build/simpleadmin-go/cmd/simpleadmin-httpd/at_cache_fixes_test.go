@@ -50,7 +50,7 @@ func TestIdleNonPageCacheEntriesEvicted(t *testing.T) {
 	}
 }
 
-func TestRefreshSelectionRequiresRecentRequestForNonPageCommands(t *testing.T) {
+func TestRefreshSelectionRequiresRecentRequestForAllCommands(t *testing.T) {
 	pageCommand := commonATCacheCommands()[0]
 	mgr := &atCommandCacheManager{entries: map[string]*atCacheEntry{
 		"ATI":       {command: "ATI", response: "OK", updatedAt: time.Now().Add(-time.Hour), lastRequested: time.Now().Add(-atCacheRecentRequestWindow - time.Minute)},
@@ -69,8 +69,24 @@ func TestRefreshSelectionRequiresRecentRequestForNonPageCommands(t *testing.T) {
 	if !set["AT+QRSRP"] {
 		t.Fatalf("recently requested non-page command missing from refresh list: %#v", commands)
 	}
-	if !set[pageCommand] {
-		t.Fatalf("stale page command missing from refresh list despite old lastRequested: %#v", commands)
+	if set[pageCommand] {
+		t.Fatalf("page command not requested within %s must not be refreshed (nobody viewing): %#v", atCacheRecentRequestWindow, commands)
+	}
+
+	// 页面打开(最近请求窗口内被 Fetch 过)时,公共命令保持周期刷新。
+	watched := &atCommandCacheManager{entries: map[string]*atCacheEntry{
+		pageCommand: {command: pageCommand, response: "OK", updatedAt: time.Now().Add(-time.Hour), lastRequested: time.Now()},
+	}}
+	if got := watched.cachedReadCommandsNeedingRefresh(); len(got) != 1 || got[0] != pageCommand {
+		t.Fatalf("recently requested page command missing from refresh list: %#v", got)
+	}
+
+	// 启动预热条目(从未被页面请求,lastRequested 零值)不得成为永久后台刷新任务。
+	warm := &atCommandCacheManager{entries: map[string]*atCacheEntry{
+		pageCommand: {command: pageCommand, response: "OK", updatedAt: time.Now().Add(-time.Hour)},
+	}}
+	if got := warm.cachedReadCommandsNeedingRefresh(); len(got) != 0 {
+		t.Fatalf("never-requested warmup entry must not be refreshed: %#v", got)
 	}
 
 	// 短信列表的既有抑制规则不受最近请求影响。
@@ -255,10 +271,17 @@ func TestInvalidateReadCacheClearsStaleResponseAndError(t *testing.T) {
 		t.Fatalf("read entry not fully invalidated: updatedAt=%s response=%q errorText=%q",
 			entry.updatedAt, entry.response, entry.errorText)
 	}
-	// 执行中的条目与动作命令条目不在失效范围内。
-	if running := mgr.entries[`AT+QENG="servingcell"`]; running.response == "" || running.updatedAt.IsZero() {
-		t.Fatalf("running entry must not be invalidated")
+	// 执行中的读条目现在同样被失效:其设备读取可能先于动作完成(读到动作前
+	// 旧数据),提交由 invalidateGen 代数检查丢弃(见 run 的 startGen 分支)。
+	// 旧语义"跳过 running 条目"正是缺陷本体:在途读命令会把动作前的旧数据
+	// 在失效之后写回缓存并标记为新鲜(溢出协程与 worker 并发时窗口真实存在)。
+	if running := mgr.entries[`AT+QENG="servingcell"`]; running.response != "" || !running.updatedAt.IsZero() {
+		t.Fatalf("running read entry must be invalidated (commit is discarded via invalidateGen)")
 	}
+	if !mgr.entries[`AT+QENG="servingcell"`].running {
+		t.Fatalf("失效不得改变 running 标记(在途执行仍需按原路径收尾)")
+	}
+	// 动作命令条目不在失效范围内。
 	if action := mgr.entries["AT+CFUN=1,1"]; action.response == "" || action.updatedAt.IsZero() {
 		t.Fatalf("action entry must not be invalidated")
 	}

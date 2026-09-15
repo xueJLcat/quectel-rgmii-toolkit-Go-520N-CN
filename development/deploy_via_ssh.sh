@@ -2,7 +2,7 @@
 # deploy_via_ssh.sh — 经 SSH/SCP 部署 SimpleAdmin Go 到设备(不依赖 adb/Windows)。
 #
 # 流程:本地构建(make arm)→ 远端备份 → 上传安装包 → 执行 install_simpleadmin_go.sh
-#       → 部署后验证 → 验证失败自动回滚备份。
+#       → 部署后验证 → 验证失败自动回滚备份 → 验证通过后删除备份释放空间。
 #
 # 用法:
 #   development/deploy_via_ssh.sh [选项]
@@ -10,6 +10,7 @@
 #     -n, --dry-run     只打印将执行的动作,不实际执行
 #         --skip-build  跳过本地构建(使用现有 simpleadmin-httpd.armv7)
 #         --rollback    不部署,回滚到设备上最近一次部署备份后即退出
+#                       (备份在部署成功后自动删除,仅备份尚存时可用)
 #     -h, --help        帮助
 #
 # 环境变量(均可覆盖):
@@ -22,7 +23,8 @@
 #   - 安装期间 Web 管理界面中断约 5~15 秒;设备的蜂窝网络/DHCP/DNS 由 QCMAP 与
 #     dnsmasq 负责,不受 simpleadmin-httpd 重启影响。
 #   - 备份保存在设备 /usrdata/simpleadmin/.deploy-backup/(二进制 + 上一版前端),
-#     可重复使用 --rollback 恢复。
+#     部署成功后自动删除以释放空间;--rollback 仅在备份尚存
+#     (异常中断/删除失败)时可用。
 #   - 安装脚本可能输出 REBOOT_REQUIRED=1(QCMAP mobileap 配置被修改时),
 #     本脚本只提示、不自动重启设备。
 
@@ -79,6 +81,10 @@ SSH_OPTS=(-o BatchMode=yes -o ConnectTimeout=10 -o IdentitiesOnly=yes
 
 ssh_cpe() { ssh "${SSH_OPTS[@]}" "$CPE_USER@$CPE_HOST" "$@"; }
 
+# 中断提示:安装阶段 SSH 断链/Ctrl-C 时 set -e 直接退出,设备可能处于半装
+# 状态;明确告知备份位置与 --rollback 恢复入口,避免操作者不知情。
+trap 'warn "部署中断:设备可能处于半装状态;若备份尚存($REMOTE_BACKUP_DIR),可执行 $0 --rollback 恢复"' INT TERM
+
 # 文件传输不使用 scp:设备端 dropbear 无 sftp-server,新版 OpenSSH scp
 # 默认走 SFTP 协议会失败。改用 tar/cat over ssh(busybox 全兼容)。
 push_file() { # push_file <本地文件> <远端路径>
@@ -127,9 +133,15 @@ local_preflight() {
              "$INSTALL_SCRIPT"; do
         [ -f "$f" ] || fail "缺少产物文件: $f"
     done
-    # ARM 可执行文件魔数校验,防止把错误架构的二进制推上设备
-    if [ "$DRY_RUN" != 1 ] && ! head -c 20 "$ARM_BIN" | grep -q ELF; then
-        fail "二进制不是 ELF 格式: $ARM_BIN"
+    # ARM 可执行文件校验:魔数 + e_machine。只查魔数挡不住架构错误——
+    # --skip-build 时误用 linux-amd64 产物同样是 ELF,推上设备后
+    # exec format error,要走完整个部署+回滚周期才失败。
+    if [ "$DRY_RUN" != 1 ]; then
+        head -c 20 "$ARM_BIN" | grep -q ELF || fail "二进制不是 ELF 格式: $ARM_BIN"
+        # e_machine 位于 ELF 头偏移 0x12(2 字节小端),EM_ARM=40(十进制)
+        # =0x0028 → 小端字节序 "2800"。
+        machine="$(od -An -j18 -N2 -tx1 "$ARM_BIN" | tr -d ' \n')"
+        [ "$machine" = "2800" ] || fail "二进制不是 ARM 架构(e_machine 字节=$machine, want 2800/EM_ARM): $ARM_BIN"
     fi
     log "本地预检通过: $ARM_BIN"
 }
@@ -137,15 +149,20 @@ local_preflight() {
 # ---------------------------------------------------------------- 远端备份
 remote_backup() {
     log "在设备上备份当前版本 → $REMOTE_BACKUP_DIR"
+    # 远端必须 set -e 且逐项校验:旧实现 cp 失败(如 /usrdata 空间不足)被
+    # 静默吞掉、末尾 echo 恒成功,部署继续推进;验证失败进入回滚时才发现
+    # "无可用备份",设备停在新版本半装、旧版本无法恢复的不可逆状态。
     run ssh_cpe "
-        set -u
+        set -eu
         mkdir -p '$REMOTE_BACKUP_DIR'
         if [ -f '$REMOTE_INSTALL_DIR/simpleadmin-httpd' ]; then
             cp -f '$REMOTE_INSTALL_DIR/simpleadmin-httpd' '$REMOTE_BACKUP_DIR/simpleadmin-httpd'
+            [ -s '$REMOTE_BACKUP_DIR/simpleadmin-httpd' ] || { echo '[错误] 备份二进制为空(检查 /usrdata 空间)' >&2; exit 1; }
         fi
         if [ -d '$REMOTE_INSTALL_DIR/www' ]; then
             rm -rf '$REMOTE_BACKUP_DIR/www'
             cp -a '$REMOTE_INSTALL_DIR/www' '$REMOTE_BACKUP_DIR/www'
+            [ -f '$REMOTE_BACKUP_DIR/www/index.html' ] || { echo '[错误] 备份 www 不完整' >&2; exit 1; }
         fi
         date '+%Y-%m-%d %H:%M:%S' > '$REMOTE_BACKUP_DIR/backup-time'
         echo '[信息] 备份完成'
@@ -164,7 +181,14 @@ rollback() {
             rm -rf '$REMOTE_INSTALL_DIR/www'
             cp -a '$REMOTE_BACKUP_DIR/www' '$REMOTE_INSTALL_DIR/www'
         fi
-        systemctl restart '$REMOTE_UNIT' >/dev/null 2>&1 || killall -HUP simpleadmin-httpd >/dev/null 2>&1 || true
+        systemctl restart '$REMOTE_UNIT' >/dev/null 2>&1 || {
+            # systemctl 不可用/失败时走安装脚本落盘的停止+启动脚本。
+            # 旧兜底 killall -HUP 是致命错误:Go 进程只注册了 SIGINT/SIGTERM,
+            # SIGHUP 走默认动作直接终止进程,而 fallback 模式(systemctl 恰好
+            # 不可用的场景)没有任何机制再拉起,回滚反而把服务打死。
+            '$REMOTE_INSTALL_DIR/stop_simpleadmin.sh' >/dev/null 2>&1 || true
+            '$REMOTE_INSTALL_DIR/start_simpleadmin.sh' >/dev/null 2>&1 || true
+        }
         sleep 2
         if systemctl is-active '$REMOTE_UNIT' >/dev/null 2>&1 || pidof simpleadmin-httpd >/dev/null 2>&1; then
             echo '[成功] 已回滚,服务运行中'
@@ -223,9 +247,28 @@ verify_deployment() {
         return 0
     fi
 
-    # 1) 服务存活
+    # 1) 服务存活:systemd 要求 SubState=running(is-active 对崩溃循环中的
+    #    activating 也返回 0);pidof 兜底必须排除 __smd-reader 子进程——它的
+    #    argv[0] 是同一二进制路径,busybox pidof 按 basename 会一并命中,
+    #    主进程已死仅剩毫秒级孤儿子进程时会误判存活。
     sleep 3
-    if ssh_cpe "systemctl is-active '$REMOTE_UNIT' >/dev/null 2>&1 || pidof simpleadmin-httpd >/dev/null 2>&1"; then
+    if ssh_cpe "
+        if systemctl is-active '$REMOTE_UNIT' >/dev/null 2>&1 \
+           && systemctl show -p SubState '$REMOTE_UNIT' 2>/dev/null | grep -q '=running'; then
+            exit 0
+        fi
+        for p in \$(pidof simpleadmin-httpd 2>/dev/null); do
+            cmd=\$(tr '\000' ' ' < /proc/\$p/cmdline 2>/dev/null)
+            case \"\$cmd\" in
+                *simpleadmin-httpd*)
+                    case \"\$cmd\" in
+                        *__smd-reader*) ;;
+                        *) exit 0 ;;
+                    esac ;;
+            esac
+        done
+        exit 1
+    "; then
         log "✓ 服务运行中"
     else
         warn "✗ 服务未运行"
@@ -240,20 +283,38 @@ verify_deployment() {
         ok=0
     fi
 
-    # 3) HTTP 可达(本机操作机直连设备 80 端口)
-    local code
-    code="$(curl -s -m 8 -o /dev/null -w '%{http_code}' "http://$CPE_HOST/" || echo 000)"
+    # 3) HTTP 可达且应答者确实是 SimpleAdmin:只看状态码时,服务已死而厂商
+    #    守护把 lighttpd 重新拉回 80 端口的场景同样返回 200/302(假阳性)。
+    #    跟随重定向取登录页,校验前端专有标识(标题含 RG520N-CN)。
+    local code body_tmp
+    body_tmp="$(mktemp)"
+    code="$(curl -sL -m 8 -o "$body_tmp" -w '%{http_code}' "http://$CPE_HOST/" 2>/dev/null || true)"
+    [ -n "$code" ] || code=000
     case "$code" in
-        200|301|302|303) log "✓ HTTP 可达(status=$code)" ;;
+        200|301|302|303)
+            if grep -q "RG520N-CN" "$body_tmp" 2>/dev/null; then
+                log "✓ HTTP 可达且为 SimpleAdmin 前端(status=$code)"
+            else
+                warn "✗ :80 应答者不是 SimpleAdmin 前端(status=$code,可能被厂商 Web 服务占用)"
+                ok=0
+            fi
+            ;;
         *) warn "✗ HTTP 不可达(status=$code)"; ok=0 ;;
     esac
+    rm -f "$body_tmp"
 
-    # 4) 页面版本占位符已被构建版本替换(确认前端为新版)
-    if curl -s -m 8 "http://$CPE_HOST/" | grep -q "__SA_VERSION__"; then
-        warn "✗ 页面仍含 __SA_VERSION__ 占位符(前端可能未更新)"
-        ok=0
+    # 4) 设备端前端与本地包一致:旧判据 grep __SA_VERSION__ 无效——占位符由
+    #    新二进制在服务端运行时替换,无论 www 新旧 served HTML 都不含占位符,
+    #    检查恒过;且 pipefail 下 grep -q 命中即退会让 curl 收 SIGPIPE,
+    #    管道非零反而走 ✓ 分支(判定方向反转)。改为比对构建产物指纹。
+    local local_sum remote_sum
+    local_sum="$(md5sum "$PKG_SRC/www/index.html" | awk '{print $1}')"
+    remote_sum="$(ssh_cpe "md5sum '$REMOTE_INSTALL_DIR/www/index.html' 2>/dev/null" | awk '{print $1}')"
+    if [ -n "$remote_sum" ] && [ "$local_sum" = "$remote_sum" ]; then
+        log "✓ 设备端前端与本地包一致"
     else
-        log "✓ 前端版本占位符已替换"
+        warn "✗ 设备端前端指纹不符(local=$local_sum remote=${remote_sum:-<读取失败>})"
+        ok=0
     fi
 
     # 5) 状态接口不再返回误导性错误(经 at-client 验证 AT 通道)
@@ -278,6 +339,17 @@ cleanup_staging() {
     if [ "$DRY_RUN" != 1 ]; then
         ssh_cpe "rm -rf '$REMOTE_PKG_DIR'" >/dev/null 2>&1 || true
     fi
+}
+
+# 部署成功后删除设备上的备份,释放 /usrdata 空间(用户要求)。
+# 回滚窗口随之关闭:--rollback 仅在异常中断残留备份时可用。
+cleanup_backup() {
+    if [ "$DRY_RUN" = 1 ]; then
+        log "[dry-run] 将删除设备备份 $REMOTE_BACKUP_DIR"
+        return
+    fi
+    log "部署成功,删除设备备份释放空间 → $REMOTE_BACKUP_DIR"
+    ssh_cpe "rm -rf '$REMOTE_BACKUP_DIR'" || warn "备份删除失败(不影响部署结果),可手动清理"
 }
 
 # ---------------------------------------------------------------- 主流程
@@ -309,6 +381,7 @@ main() {
     remote_backup
     upload_and_install
     verify_deployment
+    cleanup_backup
     cleanup_staging
 
     log "部署完成: http://$CPE_HOST/ (账号见设备 $REMOTE_INSTALL_DIR/simpleadmin.auth)"

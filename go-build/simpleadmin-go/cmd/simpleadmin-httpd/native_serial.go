@@ -97,6 +97,13 @@ func ioctl(fd uintptr, req uintptr, arg uintptr) error {
 }
 
 func waitReadableFD(fd int, timeout time.Duration) (bool, error) {
+	if fd < 0 || fd >= 1024 {
+		// syscall.FdSet 固定 128 字节(FD_SETSIZE=1024):fd ≥ 1024 时
+		// setFDSetBit 静默跳过置位,而 Select(nfds=fd+1) 仍会让内核按
+		// (nfds+7)/8 字节越界读写栈上的 FdSet(未定义行为),且永不报告
+		// 就绪。必须显式报错,不得静默降级成"空转到超时"。
+		return false, fmt.Errorf("fd %d out of select() range (FD_SETSIZE=1024)", fd)
+	}
 	if timeout <= 0 {
 		timeout = 20 * time.Millisecond
 	}
@@ -239,7 +246,7 @@ var errATLockHeldByAnotherProcess = errors.New("AT lock held by another process"
 
 var (
 	// atGlobalLockAcquireTimeout 限制全局 AT 文件锁的等待上限。长命令
-	// (扫网约 120 秒、短信事务约 70 秒)持锁期间,并发请求必须排队等到
+	// (扫网约 180 秒、短信事务约 70 秒)持锁期间,并发请求必须排队等到
 	// 其完成,而不是 30 秒即失败;200 秒覆盖最大命令时长 180 秒并留有余量,
 	// 到点后仍返回明确错误,避免被异常持锁者无限拖死。
 	// 声明为变量以便测试注入更小的上限。
@@ -253,7 +260,11 @@ func lockGlobalATFile() (func(), error) {
 	if strings.TrimSpace(lockPath) == "" {
 		lockPath = "/tmp/simpleadmin-go-at.lock"
 	}
-	f, err := os.OpenFile(lockPath, os.O_CREATE|os.O_RDWR|syscall.O_CLOEXEC, 0600)
+	// O_NOFOLLOW:缺省锁文件在全局可写的 /tmp,root 跟随符号链接打开会
+	// 被本地进程预置链接指向敏感目标(如 /dev/watchdog,O_RDWR 打开即
+	// 武装硬件看门狗);拒绝符号链接后该攻击面消除,残留文件由既有
+	// 探活清理路径处理。
+	f, err := os.OpenFile(lockPath, os.O_CREATE|os.O_RDWR|syscall.O_CLOEXEC|syscall.O_NOFOLLOW, 0600)
 	if err != nil {
 		return nil, fmt.Errorf("open AT lock file %s: %w", lockPath, err)
 	}

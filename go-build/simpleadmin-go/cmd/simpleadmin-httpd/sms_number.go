@@ -73,7 +73,7 @@ func isCIMINotReady(raw string) bool {
 		return true
 	}
 	upper := strings.ToUpper(trimmed)
-	if strings.Contains(upper, "SIM NOT INSERTED") || strings.Contains(upper, "+CME ERROR: 10") || strings.Contains(upper, "+CPIN: NOT INSERTED") {
+	if isSIMAbsentEvidence(upper) {
 		return false
 	}
 	if strings.Contains(trimmed, atCachePendingText) {

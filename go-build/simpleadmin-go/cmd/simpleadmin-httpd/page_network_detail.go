@@ -26,12 +26,20 @@ func (s *simpleAdminServer) handleNetworkDetail(w http.ResponseWriter, r *http.R
 		lanGateway = "-"
 	}
 
-	writeJSON(w, http.StatusOK, map[string]any{
+	result := map[string]any{
 		"pending":    pending,
 		"wanIPv4":    stringValue(dash["ipv4"]),
 		"wanIPv6":    stringValue(dash["ipv6"]),
 		"lanGateway": lanGateway,
 		"interfaces": collectInterfaceStats(),
 		"clients":    collectLanClients(),
-	})
+	}
+	// 与其余状态端点契约一致:非保护期且 AT 完全读取失败时标记 error,
+	// 不得把失败静默渲染成"没有 WAN 地址"的空态。WAN 侧按通用失败判定;
+	// 配置侧用专用判定(本固件 DHCPV4DNS 查询恒 ERROR,尾部 ERROR 的
+	// 部分成功不算失败,见 networkConfigStatusReadFailed)。
+	if !pending && (atReadFailed(dashRaw) || networkConfigStatusReadFailed(cfgRaw)) {
+		result["error"] = "AT 数据读取失败，请检查模块或稍后重试"
+	}
+	writeJSON(w, http.StatusOK, result)
 }

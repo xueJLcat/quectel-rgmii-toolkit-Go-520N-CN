@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"crypto"
 	"crypto/rand"
 	"crypto/rsa"
@@ -55,7 +56,15 @@ func loadUsableUserCertificate(certPath, keyPath string, caCert *x509.Certificat
 		return nil, false
 	}
 	now := time.Now()
-	if now.Before(cert.NotBefore) || now.After(cert.NotAfter) {
+	if now.After(cert.NotAfter) {
+		return nil, false
+	}
+	if now.Before(cert.NotBefore) && now.After(timeSyncMinPlausibleTime) {
+		// "尚未生效"仅在本地时钟已合理时才可信:设备无电池时钟,开机时钟
+		// 可能早于证书 NotBefore(如 1970),此时无法区分"证书未生效"与
+		// "时钟未同步"。旧实现一律判不可用,完全有效的用户自带证书会被
+		// 静默覆写为自签托管证书且无从恢复;时钟明显不合理时保留证书,
+		// 真实有效性交由 TLS 握手与校时后的下次启动复核。
 		return nil, false
 	}
 	key, err := loadPrivateKey(keyPath)
@@ -211,6 +220,15 @@ func serverCertificateMatches(certPath, keyPath string, caCert *x509.Certificate
 	if cert.IsCA || time.Now().After(cert.NotAfter.AddDate(0, 0, -30)) {
 		return false
 	}
+	// "尚未生效"的托管证书必须触发重签自愈:时钟先被拨快(异常 NTP 等)
+	// 期间重签出的证书 NotBefore 在未来,时钟校回后所有校验有效期的 TLS
+	// 客户端都拒绝握手,而签名/EKU/IP/NotAfter 判据全部通过,证书永不自愈,
+	// HTTPS 瘫痪可持续约一年。判据与 loadUsableUserCertificate 镜像:仅在
+	// 本地时钟已合理时采信"未生效",冷启动 1970 时钟无法区分"证书未生效"
+	// 与"时钟未同步",保留证书交校时后的下次启动复核。
+	if now := time.Now(); now.Before(cert.NotBefore) && now.After(timeSyncMinPlausibleTime) {
+		return false
+	}
 	if err := cert.CheckSignatureFrom(caCert); err != nil {
 		return false
 	}
@@ -303,6 +321,15 @@ func requiredTLSCertificateIPs() []net.IP {
 			if ip == nil {
 				continue
 			}
+			// 只纳入稳定地址(环回 + LAN 侧私网 IPv4):蜂窝 WAN 的动态
+			// IPv4/随机 IID 的 IPv6 几乎每次拨号都变,纳入"必须包含"判据会
+			// 让证书匹配随启动时序(附网早于/晚于 httpd)非确定性失败,触发
+			// 无意义重签(RSA keygen 拖慢启动、叶子指纹反复失效、误导性
+			// 日志);且启动后新出现的地址本机制也覆盖不了。LAN 私网地址
+			// 是管理入口且可经 LANIP 设置变更,保留以在网段变化时重签。
+			if !ip.IsLoopback() && (ip.To4() == nil || !ip.IsPrivate()) {
+				continue
+			}
 			addIP(ip.String())
 		}
 	}
@@ -356,27 +383,24 @@ func loadRSAPrivateKey(path string) (*rsa.PrivateKey, error) {
 	return x509.ParsePKCS1PrivateKey(block.Bytes)
 }
 
+// writeCertificatePEM 以临时文件+落盘+rename 原子写证书(复用 atomicWriteFile,
+// 与全仓掉电安全约定一致):O_TRUNC 直写在掉电时会留下半截 PEM,下次启动
+// 被判定损坏而重签,用户已信任/分发的旧叶子证书随之失效。
 func writeCertificatePEM(path string, certDER []byte) error {
-	file, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0644)
-	if err != nil {
+	var buf bytes.Buffer
+	if err := pem.Encode(&buf, &pem.Block{Type: "CERTIFICATE", Bytes: certDER}); err != nil {
 		return err
 	}
-	if err := pem.Encode(file, &pem.Block{Type: "CERTIFICATE", Bytes: certDER}); err != nil {
-		_ = file.Close()
-		return err
-	}
-	return file.Close()
+	return atomicWriteFile(path, buf.Bytes(), 0644)
 }
 
+// writeRSAPrivateKeyPEM 原子写私钥(0600),理由同 writeCertificatePEM;
+// 掉电留下半截私钥会与证书不配对,触发的重签代价更高。
 func writeRSAPrivateKeyPEM(path string, privateKey *rsa.PrivateKey) error {
-	file, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0600)
-	if err != nil {
-		return err
-	}
+	var buf bytes.Buffer
 	keyBytes := x509.MarshalPKCS1PrivateKey(privateKey)
-	if err := pem.Encode(file, &pem.Block{Type: "RSA PRIVATE KEY", Bytes: keyBytes}); err != nil {
-		_ = file.Close()
+	if err := pem.Encode(&buf, &pem.Block{Type: "RSA PRIVATE KEY", Bytes: keyBytes}); err != nil {
 		return err
 	}
-	return file.Close()
+	return atomicWriteFile(path, buf.Bytes(), 0600)
 }

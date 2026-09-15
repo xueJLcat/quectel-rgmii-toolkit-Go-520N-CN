@@ -1,6 +1,6 @@
 # Windows 本地测试 SimpleAdmin Go 服务
 
-这个目录用于在 Windows 上测试 Go 版 SimpleAdmin 的 Web/Vue 页面、登录认证、路由和 `/api/*` 接口。
+这个目录用于在 Windows 上测试 Go 版 SimpleAdmin 的 Web/React 页面、登录认证、路由和 `/api/*` 接口。
 
 ## 一键运行
 
@@ -32,7 +32,7 @@ Windows 测试使用 `--mock` 模式：
 - 不安装 systemd 服务
 - AT、短信、TTL、基础状态返回本地模拟数据
 - `/console` 只显示 Windows 测试说明，不启动 Linux 原生 PTY shell
-- 启动窗口支持手动输入首页 AT 测试数据，不需要改 `index.js` 里的测试常量
+- 启动窗口支持手动输入首页 AT 测试数据，不需要改前端代码
 
 这样可以在没有模块、没有 ADB、没有串口设备的 Windows 电脑上检查页面和接口是否正常。
 
@@ -62,31 +62,13 @@ show    # 查看当前是否启用手动输入
 clear   # 清除全部手动输入，恢复默认 mock 数据
 ```
 
-## 浏览器开发者工具 Console 输入
+## 浏览器端 mock 数据注入
 
-Windows mock 控制台输入会保留，同时也可以在网页开发者工具 Console 里直接输入：
+旧前端在浏览器开发者工具 Console 提供的 `SimpleAdmin.MockAT.*` / `saAt(...)` 等全局命令已随 Vue 管线退役。后端 `/api/mock_at` 接口保留（只在 `--mock` 模式生效，真实模块运行时拒绝；经 `/api/ws` 网关访问，供前端测试代码使用），日常调试请优先使用上面命令行窗口的输入方式。
 
-```js
-SimpleAdmin.MockAT.at(`粘贴整段首页 AT 返回`)
-SimpleAdmin.MockAT.qca(`粘贴 QCAINFO 返回`)
-SimpleAdmin.MockAT.qeng(`粘贴 QENG 返回`)
-SimpleAdmin.MockAT.parse()
-SimpleAdmin.MockAT.show()
-SimpleAdmin.MockAT.clear()
-```
+## 前端测试
 
-也提供简写：
-
-```js
-saAt(`粘贴整段首页 AT 返回`)
-saQca(`粘贴 QCAINFO 返回`)
-saQeng(`粘贴 QENG 返回`)
-saParseAT()
-saShowAT()
-saClearAT()
-```
-
-这些命令通过 `POST /api/mock_at` 写入 Windows mock 后端，浏览器首页下一次刷新会使用新的 AT 测试数据。真实模块运行时该接口会拒绝。
+前端校验不再依赖本目录脚本（旧 `frontend_smoke.js` 已删除）：单元/组件测试与端到端测试位于 `development/simpleadmin/frontend-react/`——`make web-test`（typecheck + lint + vitest）、`make web-e2e`（Playwright，webServer 自起 mock 后端）。本目录只提供 Windows 手动检查页面与接口用的 mock 服务（`run_windows_test.bat`）；linux 侧等价为 `make dev-mock`。
 
 ## 手动编译
 

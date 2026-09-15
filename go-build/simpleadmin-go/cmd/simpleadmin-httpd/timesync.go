@@ -4,6 +4,7 @@
 package main
 
 import (
+	"bytes"
 	"encoding/binary"
 	"encoding/json"
 	"fmt"
@@ -32,10 +33,27 @@ const (
 	timeSyncFailureRetry = 5 * time.Minute
 	// NTP 时间戳 epoch(1900-01-01)与 Unix epoch(1970-01-01)的秒差。
 	ntpEpochOffset = 2208988800
-	// 单次同步允许的最大步进幅度(约 1 年):超出视为异常应答(如 Kiss-o'-Death
-	// 或错误报文),拒绝写入系统时间,避免把时钟打到离谱的值。
+	// 单次同步允许的最大回拨幅度(约 1 年):本地时钟已合理时,向后大幅
+	// 步进(本地超前)只可能来自此前的坏校时/手工设置,拒绝写入系统时间,
+	// 避免异常应答把时钟打到离谱的值。向前大幅步进(本地落后)不受此限:
+	// 那是无电池时钟设备的常态,见 timeSyncMinPlausibleTime 的说明。
 	timeSyncMaxStep = 365 * 24 * time.Hour
+	// 单次采样允许的最大往返时延:蜂窝链路严重拥塞/不对称时单样本误差
+	// 可达秒级,直接写钟会引入同量级误差;超限丢弃本次样本等下轮重试。
+	timeSyncMaxRoundTrip = 5 * time.Second
 )
+
+// timeSyncMinPlausibleTime 是本地时钟"合理"的下界,仅用于向后大幅步进
+// (回拨)的护栏豁免:设备无电池时钟,冷启动时系统时间是错误值(1970 年),
+// 本地时钟早于该下界时跳过回拨幅度检查直接校正。
+// 向前大幅步进(本地落后)一律放行、不再依赖本下界:开机时钟也可能是固件
+// 构建日期(注释与实机行为均已确认),构建日期恒"晚于 2020"且随时间推移
+// 与真实时间的偏差必然超过 timeSyncMaxStep——固定下界判"时钟已合理"是
+// 时间炸弹,2026 年任何 2025 年前构建的固件冷启动校时都会被永久拒绝,
+// 时间同步在其最主要场景(纠正开机大偏差)完全失效。应答可信性由报文
+// 防线约束:KoD(stratum=0)、LI=3、originate 回显绑定(拒绝路径内注入)、
+// t3≥t2 与往返时延上限,全部保持生效。
+var timeSyncMinPlausibleTime = time.Date(2020, 1, 1, 0, 0, 0, 0, time.UTC)
 
 // timeSyncConfig 时间同步配置;Server 为单一 NTP 源,空值回退缺省服务器。
 type timeSyncConfig struct {
@@ -150,14 +168,24 @@ func writeTimeSyncConfig(cfg timeSyncConfig) error {
 	return atomicWriteFile(timeSyncConfigFile(), append(data, '\n'), 0600)
 }
 
-// syncTimeSyncPoller 按配置同步轮询器运行状态:启用时启动(幂等),
-// 禁用时停止(幂等)。服务启动时与保存配置后调用。
+// syncTimeSyncPoller 按配置同步轮询器运行状态:启用时重启循环(先停后启,
+// 幂等),禁用时停止(幂等)。服务启动时与保存配置后调用。
+// 配置读取与启停决定必须在同一临界区内完成:锁外读取再锁外启停时,并发
+// set_timesync 交错(启用请求读到 true → 禁用请求完成 stop → 启用请求
+// 再 start)会留下"配置已禁用但轮询器常驻"的残留状态。
+// 启用路径必须重启而非仅幂等启动:等待中的循环按开始等待时取的旧间隔
+// 睡眠,修改间隔/更换 NTP 服务器后若不重启,新配置要等旧间隔(最长 24
+// 小时)睡满才生效,与保存接口"立即生效"的响应语义相悖(与
+// syncWatchdogPoller 对齐)。
 func syncTimeSyncPoller(s *simpleAdminServer) {
+	timeSyncPollerMu.Lock()
+	defer timeSyncPollerMu.Unlock()
 	if readTimeSyncConfig().Enabled {
-		startTimeSyncPoller(s)
+		stopTimeSyncPollerLocked()
+		startTimeSyncPollerLocked(s)
 		return
 	}
-	stopTimeSyncPoller()
+	stopTimeSyncPollerLocked()
 }
 
 // startTimeSyncPoller 启动时间同步轮询循环(幂等):启用后先等待
@@ -166,6 +194,11 @@ func syncTimeSyncPoller(s *simpleAdminServer) {
 func startTimeSyncPoller(s *simpleAdminServer) {
 	timeSyncPollerMu.Lock()
 	defer timeSyncPollerMu.Unlock()
+	startTimeSyncPollerLocked(s)
+}
+
+// startTimeSyncPollerLocked 启动轮询循环,调用方必须持有 timeSyncPollerMu。
+func startTimeSyncPollerLocked(s *simpleAdminServer) {
 	if timeSyncPollerStop != nil {
 		return
 	}
@@ -188,6 +221,11 @@ func startTimeSyncPoller(s *simpleAdminServer) {
 func stopTimeSyncPoller() {
 	timeSyncPollerMu.Lock()
 	defer timeSyncPollerMu.Unlock()
+	stopTimeSyncPollerLocked()
+}
+
+// stopTimeSyncPollerLocked 停止轮询循环,调用方必须持有 timeSyncPollerMu。
+func stopTimeSyncPollerLocked() {
 	if timeSyncPollerStop == nil {
 		return
 	}
@@ -243,6 +281,10 @@ func parseNTPResponse(packet []byte, t1, t4 time.Time) (ntpResult, error) {
 	if mode != 4 {
 		return ntpResult{}, fmt.Errorf("unexpected ntp mode %d", mode)
 	}
+	// LI=3(alarm condition)表示服务器自身时钟未同步,其应答不可用于校时。
+	if packet[0]>>6 == 3 {
+		return ntpResult{}, fmt.Errorf("ntp server clock not synchronized (LI=3)")
+	}
 	stratum := packet[1]
 	if stratum == 0 || stratum > 15 {
 		return ntpResult{}, fmt.Errorf("unusable ntp stratum %d", stratum)
@@ -251,6 +293,11 @@ func parseNTPResponse(packet []byte, t1, t4 time.Time) (ntpResult, error) {
 	t3, ok3 := ntpTimestamp(packet[40:48])
 	if !ok2 || !ok3 {
 		return ntpResult{}, fmt.Errorf("ntp timestamps missing")
+	}
+	// t3(发送应答)不得早于 t2(收到请求):违反说明服务器时钟异常或
+	// 报文损坏,负的处理耗时会给 θ 混入伪偏差。
+	if t3.Before(t2) {
+		return ntpResult{}, fmt.Errorf("ntp server timestamps inconsistent (transmit before receive)")
 	}
 	// θ = ((t2-t1) + (t3-t4)) / 2;δ = (t4-t1) - (t3-t2)
 	offset := (t2.Sub(t1) + t3.Sub(t4)) / 2
@@ -284,8 +331,15 @@ func defaultTimeSyncQuery(server string, timeout time.Duration) (ntpResult, erro
 
 	packet := make([]byte, 48)
 	packet[0] = 0x1B // LI=0, VN=3, Mode=3(client)
-	_ = conn.SetDeadline(time.Now().Add(timeout))
+	// 请求写入 Transmit Timestamp(T1,RFC 4330 §5):服务器必须在应答的
+	// Originate Timestamp(字节 24-31)原样回显,以此把应答绑定到本次请求,
+	// 拒绝路径内注入的伪造/错发包(旧实现请求时间戳全零且不校验回显,
+	// 任何能向该 UDP 四元组注入一个包的攻击者都能任意校时)。
 	t1 := time.Now()
+	binary.BigEndian.PutUint32(packet[40:], uint32(t1.Unix()+ntpEpochOffset))
+	binary.BigEndian.PutUint32(packet[44:], uint32((uint64(t1.Nanosecond())<<32)/uint64(time.Second)))
+	transmit := append([]byte(nil), packet[40:48]...)
+	_ = conn.SetDeadline(time.Now().Add(timeout))
 	if _, err := conn.Write(packet); err != nil {
 		return ntpResult{}, err
 	}
@@ -294,6 +348,9 @@ func defaultTimeSyncQuery(server string, timeout time.Duration) (ntpResult, erro
 	t4 := time.Now()
 	if err != nil {
 		return ntpResult{}, err
+	}
+	if n < 48 || !bytes.Equal(reply[24:32], transmit) {
+		return ntpResult{}, fmt.Errorf("ntp originate timestamp mismatch (bogus reply)")
 	}
 	return parseNTPResponse(reply[:n], t1, t4)
 }
@@ -322,10 +379,13 @@ func runTimeSyncOnce(s *simpleAdminServer, server string) map[string]any {
 		// 时间戳,状态页会把失败显示成一次新鲜同步,误导排障。
 		if ok {
 			timeSyncState.lastSyncTime = time.Now()
+			// lastOffsetMs 与 lastSyncTime 同为"最近一次成功同步"语义:
+			// 失败尝试不得把成功偏差覆写成 0,否则状态页出现"上次同步
+			// 时间=昨天、偏差=0ms"的混合语义,误导排障。
+			timeSyncState.lastOffsetMs = offset.Milliseconds()
 		}
 		timeSyncState.lastOK = ok
 		timeSyncState.lastError = errText
-		timeSyncState.lastOffsetMs = offset.Milliseconds()
 		timeSyncState.lastServer = server
 		timeSyncState.mu.Unlock()
 		result := map[string]any{
@@ -353,9 +413,17 @@ func runTimeSyncOnce(s *simpleAdminServer, server string) map[string]any {
 		log.Printf("时间同步: 查询 %s 失败: %v", server, err)
 		return record(false, 0, err.Error())
 	}
-	if result.Offset > timeSyncMaxStep || result.Offset < -timeSyncMaxStep {
-		log.Printf("时间同步: %s 应答偏差 %s 异常,拒绝修改系统时间", server, result.Offset)
+	// 回拨护栏仅约束"本地时钟已合理"的场景:冷启动 1970 时钟必须放行
+	// (见 timeSyncMinPlausibleTime)。向前步进(本地落后,含冷启动 1970/
+	// 固件构建日期与真实时间的数年偏差)一律放行,否则无电池时钟设备永远
+	// 无法完成首次校时;本地超前一年以上的向后步进才是异常态,拒绝。
+	if result.Offset < -timeSyncMaxStep && time.Now().After(timeSyncMinPlausibleTime) {
+		log.Printf("时间同步: %s 应答偏差 %s 异常(本地时钟超前将被回拨超过上限),拒绝修改系统时间", server, result.Offset)
 		return record(false, 0, "offset out of range")
+	}
+	if result.RoundTrip > timeSyncMaxRoundTrip {
+		log.Printf("时间同步: %s 应答往返时延 %s 过大,丢弃本次样本", server, result.RoundTrip)
+		return record(false, 0, fmt.Sprintf("round trip too large: %s", result.RoundTrip))
 	}
 
 	newTime := time.Now().Add(result.Offset)

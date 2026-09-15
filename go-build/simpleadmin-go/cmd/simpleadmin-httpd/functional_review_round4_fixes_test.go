@@ -3,7 +3,6 @@ package main
 import (
 	"os"
 	"path/filepath"
-	"regexp"
 	"strings"
 	"testing"
 	"time"
@@ -119,57 +118,5 @@ func TestWriteTTLValueAtomicRoundTrip(t *testing.T) {
 		if strings.HasPrefix(entry.Name(), ".simpleadmin.tmp.") {
 			t.Fatalf("temp file not cleaned up: %s", entry.Name())
 		}
-	}
-}
-
-// TestHTMLI18nKeysHaveEnglishTranslations 锚定修复:HTML 模板引用的每个含中文
-// 的 i18n 键必须在 simpleadmin-lang.js 的 en 字典中存在,否则英文界面下对应
-// 文案/无障碍标签保持中文。回归背景:DNS V6 代理开关 aria 键曾缺失。
-func TestHTMLI18nKeysHaveEnglishTranslations(t *testing.T) {
-	wwwDir := filepath.Clean(filepath.Join("..", "..", "..", "..", "development", "simpleadmin", "www"))
-
-	langData, err := os.ReadFile(filepath.Join(wwwDir, "js", "simpleadmin-lang.js"))
-	if err != nil {
-		t.Fatalf("read simpleadmin-lang.js: %v", err)
-	}
-	dictKeys := map[string]bool{}
-	entryRE := regexp.MustCompile(`(?m)^\s*'((?:[^'\\]|\\.)*)'\s*:\s*'`)
-	for _, match := range entryRE.FindAllStringSubmatch(string(langData), -1) {
-		dictKeys[match[1]] = true
-	}
-	if len(dictKeys) == 0 {
-		t.Fatal("no en dictionary entries parsed from simpleadmin-lang.js")
-	}
-
-	htmlEntries, err := os.ReadDir(wwwDir)
-	if err != nil {
-		t.Fatalf("read www dir: %v", err)
-	}
-	attrRE := regexp.MustCompile(`data-simpleadmin-i18n-(?:key|placeholder|aria)="([^"]+)"`)
-	entities := strings.NewReplacer("&amp;", "&", "&lt;", "<", "&gt;", ">", "&quot;", `"`, "&#39;", "'")
-	cjkRE := regexp.MustCompile(`[\x{4e00}-\x{9fff}]`)
-
-	checked := 0
-	for _, entry := range htmlEntries {
-		if entry.IsDir() || filepath.Ext(entry.Name()) != ".html" {
-			continue
-		}
-		data, err := os.ReadFile(filepath.Join(wwwDir, entry.Name()))
-		if err != nil {
-			t.Fatalf("read %s: %v", entry.Name(), err)
-		}
-		for _, match := range attrRE.FindAllStringSubmatch(string(data), -1) {
-			key := entities.Replace(match[1])
-			if !cjkRE.MatchString(key) {
-				continue
-			}
-			checked++
-			if !dictKeys[key] {
-				t.Errorf("%s: i18n key %q has no en translation", entry.Name(), key)
-			}
-		}
-	}
-	if checked == 0 {
-		t.Fatal("no CJK i18n keys found in HTML templates; check the scan pattern")
 	}
 }

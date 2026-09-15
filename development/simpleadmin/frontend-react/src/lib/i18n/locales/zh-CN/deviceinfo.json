@@ -1,0 +1,21 @@
+{
+  "failedToLoadDeviceInfo": "设备信息读取失败",
+  "manufacturer": "制造商",
+  "modelName": "型号名称",
+  "firmwareVersion": "固件版本",
+  "phoneNumber": "电话号码",
+  "lanIp": "局域网IP",
+  "wanIpv": "广域网IPv",
+  "version": "版本",
+  "noSim": "未插卡",
+  "noPhoneNumberAvailable": "无本机号码",
+  "imei": "IMEI",
+  "imsi": "IMSI",
+  "iccid": "ICCID",
+  "simStatus": "SIM 状态",
+  "simInserted": "已插卡",
+  "simUnknown": "未知",
+  "wanIpv4": "广域网IPv4",
+  "wanIpv6": "广域网IPv6",
+  "codeRepository": "代码库"
+}

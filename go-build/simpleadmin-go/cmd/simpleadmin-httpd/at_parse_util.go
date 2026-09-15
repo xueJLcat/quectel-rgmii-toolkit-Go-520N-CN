@@ -223,3 +223,19 @@ func decodeMaybeUCS2(value string) string {
 	}
 	return b.String()
 }
+
+// simAbsentCMERegexp 精确匹配缺卡类 CME 错误码:10(SIM not inserted)与
+// 310((U)SIM not inserted,ETSI 扩展码,本模块手册 CME 错误表收录)。
+// 旧的子串匹配 "+CME ERROR: 10" 会误命中 100~107 等标准码(unknown/
+// invalid command 类,一旦固件输出即整页 SIM 数据被误清),同时漏配 310;
+// \b 保证 10/310 不是更长编号的前缀。
+var simAbsentCMERegexp = regexp.MustCompile(`\+CME ERROR: *(10|310)\b`)
+
+// isSIMAbsentEvidence 判定已大写的文本(单行或整段应答)是否含明确的
+// 缺卡证据。仪表盘/设备信息/短信页/号码归一化四处 SIM 状态解析共用,
+// 保证 CME 错误码口径一致。
+func isSIMAbsentEvidence(upperText string) bool {
+	return strings.Contains(upperText, "SIM NOT INSERTED") ||
+		strings.Contains(upperText, "+CPIN: NOT INSERTED") ||
+		simAbsentCMERegexp.MatchString(upperText)
+}

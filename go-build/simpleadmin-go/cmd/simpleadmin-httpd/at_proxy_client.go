@@ -25,11 +25,15 @@ const (
 )
 
 // at-client 侧的超时与响应上限:
-// 交换超时需覆盖服务端最坏情况:全局锁等待 200 秒 + 命令执行 180 秒;
+// 交换超时需覆盖服务端真实最坏情况:全局锁等待 200 秒 + 命令执行
+// (读命令超时后运行器自动重试一次)2×180 秒 + 重试间隔与写回余量 ≈
+// 561 秒,取 600 秒。旧值 400 秒按单次 180 秒计算,漏掉重试预算——
+// 长命令在锁竞争下客户端先超时断开,还被误归退出码 2(连接层错误),
+// 而服务端仍在执行、结果写向已关闭的连接被丢弃。
 // 响应上限防止异常输出撑爆内存(声明为变量便于测试注入更小的上限)。
 const (
 	atClientDialTimeout     = 5 * time.Second
-	atClientExchangeTimeout = 400 * time.Second
+	atClientExchangeTimeout = 600 * time.Second
 )
 
 var atClientMaxResponseBytes int64 = 16 << 20 // 16MB
@@ -110,12 +114,15 @@ func atClientExchange(sockPath string, payload []byte) ([]byte, error) {
 		return nil, err
 	}
 
-	reader := bufio.NewReader(io.LimitReader(conn, atClientMaxResponseBytes))
+	// 多读 1 字节用于区分"恰好等于上限的合法响应"与"超限截断":
+	// 旧实现 LimitReader 上限即 atClientMaxResponseBytes,响应恰好为上限
+	// 且以换行结尾时,换行是第 N+1 字节读不到,被误判为截断。
+	reader := bufio.NewReader(io.LimitReader(conn, atClientMaxResponseBytes+1))
 	line, err := reader.ReadBytes('\n')
 	if err != nil {
-		// 未读到换行即到 EOF:响应达到上限被截断(超大转录)。明确报错,
+		// 未读到换行即到 EOF:响应超过上限被截断(超大转录)。明确报错,
 		// 避免把截断误诊为连接/代理故障,也防止把半截 JSON 当成功输出。
-		if err == io.EOF && int64(len(line)) >= atClientMaxResponseBytes {
+		if err == io.EOF && int64(len(line)) > atClientMaxResponseBytes {
 			return nil, fmt.Errorf("AT 响应超过上限 %d 字节,已被截断", atClientMaxResponseBytes)
 		}
 		return nil, err

@@ -1,0 +1,16 @@
+{
+  "networkConnectionFailedPleaseCheckYourNetworkAndTryAgain": "Network connection failed. Please check your network and try again.",
+  "sessionExpired": "Session expired",
+  "signInAgain": "Sign in again",
+  "username": "Username",
+  "password": "Password",
+  "signIn": "Sign In",
+  "signingIn": "Signing in...",
+  "enterYourUsernameAndPassword": "Enter your username and password",
+  "incorrectUsernameOrPassword": "Incorrect username or password",
+  "tooManyAttemptsPleaseTryAgainLater": "Too many attempts. Please try again later.",
+  "authenticationConfigurationError": "Authentication configuration error",
+  "tooManyAttemptsPleaseRetryIn": "Too many attempts. Please retry in ",
+  "secondsBeforeRetry": " seconds.",
+  "secondsUntilRetry": " seconds"
+}

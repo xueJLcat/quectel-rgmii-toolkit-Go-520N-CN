@@ -32,8 +32,10 @@ func TestATCommandTimeoutUsesLongWaitForDisableIPPassthrough(t *testing.T) {
 	if got := atCommandTimeoutMS(`AT+QMAP="MPDN_RULE",0`); got != 10000 {
 		t.Fatalf("atCommandTimeoutMS(disable passthrough) = %d, want 10000", got)
 	}
-	if got := atCacheWaitTimeout(`AT+QMAP="MPDN_RULE",0`); got != 12*time.Second {
-		t.Fatalf("atCacheWaitTimeout(disable passthrough) = %s, want 12s", got)
+	// 动作命令等待预算 = 自身单次预算(10s) + 排队余量(45s,覆盖至多一条
+	// 在执行中的长读命令) + 2s 见 atCacheActionQueueAllowanceMS 注释。
+	if got := atCacheWaitTimeout(`AT+QMAP="MPDN_RULE",0`); got != 57*time.Second {
+		t.Fatalf("atCacheWaitTimeout(disable passthrough) = %s, want 57s", got)
 	}
 }
 
@@ -593,41 +595,53 @@ func TestVuePagesHaveValidMountScripts(t *testing.T) {
 	}
 }
 
-func TestWebFrontendUsesVue3AndNoAlpine(t *testing.T) {
+// TestWebFrontendIsReactBuild 守护 www 切换后的前端形态:React SPA(Vite 构建产物),
+// 旧 Vue3/Alpine 运行时已退役;根目录只保留 index.html 与 login.html 两个 HTML 入口,
+// 均挂载 #root、引用 /assets/ 产物并保留 __SA_VERSION__/__SA_THEME__ 占位符约定
+// (占位符由服务端响应时替换,源文件必须保留)。
+func TestWebFrontendIsReactBuild(t *testing.T) {
 	staticDir := filepath.Clean(filepath.Join("..", "..", "..", "..", "development", "simpleadmin", "www"))
-	if _, err := os.Stat(filepath.Join(staticDir, "js", "vue.global.prod.js")); err != nil {
-		t.Fatalf("Vue 3 runtime is not packaged: %v", err)
+	for _, legacy := range []string{
+		filepath.Join(staticDir, "js", "vue.global.prod.js"),
+		filepath.Join(staticDir, "js", "vue-app.js"),
+		filepath.Join(staticDir, "js", "alpinejs.min.js"),
+	} {
+		if _, err := os.Stat(legacy); err == nil {
+			t.Fatalf("legacy frontend runtime should be removed after React migration: %s", legacy)
+		}
 	}
-	if _, err := os.Stat(filepath.Join(staticDir, "js", "vue-app.js")); err != nil {
-		t.Fatalf("Vue mount helper is not packaged: %v", err)
+	assets, err := os.ReadDir(filepath.Join(staticDir, "assets"))
+	if err != nil {
+		t.Fatalf("www/assets (vite build output) missing: %v", err)
 	}
-	if _, err := os.Stat(filepath.Join(staticDir, "js", "alpinejs.min.js")); err == nil {
-		t.Fatalf("Alpine runtime should not be packaged after Vue 3 migration")
+	if len(assets) == 0 {
+		t.Fatal("www/assets is empty")
 	}
 
 	entries, err := os.ReadDir(staticDir)
 	if err != nil {
 		t.Fatalf("read static dir: %v", err)
 	}
-	legacy := regexp.MustCompile(`(?i)alpine|x-data|x-init|x-text|x-html|x-show|x-if|x-for|x-model|x-bind`)
+	legacyRE := regexp.MustCompile(`(?i)vue\.global|alpine|x-data`)
 	for _, entry := range entries {
 		if entry.IsDir() || filepath.Ext(entry.Name()) != ".html" {
 			continue
+		}
+		// www 根目录只保留主应用与登录两个 HTML 入口
+		if entry.Name() != "index.html" && entry.Name() != "login.html" {
+			t.Fatalf("unexpected extra html file in www root: %s", entry.Name())
 		}
 		data, err := os.ReadFile(filepath.Join(staticDir, entry.Name()))
 		if err != nil {
 			t.Fatalf("read %s: %v", entry.Name(), err)
 		}
-		if match := legacy.FindString(string(data)); match != "" {
-			t.Fatalf("%s still contains legacy Alpine markup: %s", entry.Name(), match)
+		for _, want := range []string{`id="root"`, `/assets/`, appVersionPlaceholder, themePlaceholder} {
+			if !strings.Contains(string(data), want) {
+				t.Fatalf("%s does not satisfy React frontend contract: missing %q", entry.Name(), want)
+			}
 		}
-		// 前端已重构为 index.html 单页应用；www 根目录只保留实际
-		// 使用的 index.html 和 login.html，不再保留兼容跳转 HTML。
-		if entry.Name() == "index.html" && !regexp.MustCompile(`js/vue\.global\.prod\.js`).Match(data) {
-			t.Fatalf("%s does not load local Vue 3 runtime", entry.Name())
-		}
-		if entry.Name() != "index.html" && entry.Name() != "login.html" {
-			t.Fatalf("unexpected extra html file in www root: %s", entry.Name())
+		if match := legacyRE.FindString(string(data)); match != "" {
+			t.Fatalf("%s still references legacy frontend runtime: %s", entry.Name(), match)
 		}
 	}
 }
@@ -1163,8 +1177,10 @@ func TestMockDashboardDefaultPayloadMatchesRealCPE(t *testing.T) {
 	if !strings.Contains(stringValue(data["cellID"]), "24211A484") {
 		t.Fatalf("cellID = %q, want contain 24211A484", data["cellID"])
 	}
-	if data["nr_rx_bytes"] != int64(62817184) || data["nr_tx_bytes"] != int64(45605113) {
-		t.Fatalf("nr counters = (%v, %v), want (62817184, 45605113)", data["nr_rx_bytes"], data["nr_tx_bytes"])
+	// mock 载荷 +QGDNRCNT: 62817184,45605113 按手册 §9.7 字段序
+	// <bytes_sent>,<bytes_recv> 解读:tx=62817184、rx=45605113。
+	if data["nr_rx_bytes"] != int64(45605113) || data["nr_tx_bytes"] != int64(62817184) {
+		t.Fatalf("nr counters = (%v, %v), want (45605113, 62817184)", data["nr_rx_bytes"], data["nr_tx_bytes"])
 	}
 	if percentFromAny(data["signalPercentage"]) <= 0 {
 		t.Fatalf("signalPercentage = %v, want > 0", data["signalPercentage"])

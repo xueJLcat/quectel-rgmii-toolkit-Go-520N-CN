@@ -38,11 +38,19 @@ const (
 // nativeConsoleReadTimeout 是读循环的空闲上限:每读一帧前置位并续期。
 // 客户端断电/拔线后连接停留在半开状态时,读协程靠它超时退出,
 // 随连接清理一起终止 PTY shell,避免协程与进程永久泄漏。
+// 健康但无键入的会话由服务端心跳 ping 续期:浏览器协议层自动回 pong,
+// pong 帧同样续期——用户长时间观看 top/ping 输出不敲键盘时,连接不再
+// 被空闲超时误杀、前台任务不被连带 SIGKILL。
 //
 // nativeConsoleWriteTimeout 限制单帧写入时间,防止卡死客户端阻塞写端。
 var (
 	nativeConsoleReadTimeout  = 5 * time.Minute
 	nativeConsoleWriteTimeout = 5 * time.Second
+	// nativeConsolePingInterval 服务端心跳 ping 间隔,须显著小于读空闲超时。
+	nativeConsolePingInterval = 60 * time.Second
+	// nativeConsoleSessionRecheckInterval 会话复核间隔:root shell 是权限
+	// 最高的长连接,握手后不能豁免复核(见主循环处注释)。
+	nativeConsoleSessionRecheckInterval = 60 * time.Second
 )
 
 // nativeConsoleResizeMessage 是客户端→服务端的窗口尺寸控制帧。
@@ -96,6 +104,14 @@ func (s *simpleAdminServer) handleNativeConsoleWebSocket(w http.ResponseWriter, 
 		http.Error(w, "websocket hijack unavailable", http.StatusInternalServerError)
 		return
 	}
+	// 留存握手会话令牌供连接期内周期复核:hijack 后请求对象不再可用。
+	sessionToken := ""
+	if cookie, err := r.Cookie(sessionCookieName); err == nil {
+		sessionToken = cookie.Value
+	}
+	// Hijack 前取出会话中间件已重签的 Set-Cookie 并写入手写 101:
+	// 否则续期额度被消耗而 Cookie 从未送达(与 handleAPIWebSocket 同一修复)。
+	pendingCookies := w.Header().Values("Set-Cookie")
 	conn, rw, err := hijacker.Hijack()
 	if err != nil {
 		return
@@ -105,6 +121,9 @@ func (s *simpleAdminServer) handleNativeConsoleWebSocket(w http.ResponseWriter, 
 	_, _ = rw.Writer.WriteString("HTTP/1.1 101 Switching Protocols\r\n")
 	_, _ = rw.Writer.WriteString("Upgrade: websocket\r\n")
 	_, _ = rw.Writer.WriteString("Connection: Upgrade\r\n")
+	for _, cookie := range pendingCookies {
+		_, _ = rw.Writer.WriteString("Set-Cookie: " + cookie + "\r\n")
+	}
 	_, _ = rw.Writer.WriteString("Sec-WebSocket-Accept: " + accept + "\r\n\r\n")
 	if err := rw.Writer.Flush(); err != nil {
 		_ = conn.Close()
@@ -127,6 +146,26 @@ func (s *simpleAdminServer) handleNativeConsoleWebSocket(w http.ResponseWriter, 
 	_ = ws.writeBinary([]byte("AT channel: /dev/smd11 is used by " + consoleModel + "\r\n"))
 	_ = ws.writeBinary([]byte("==============================================================\r\n"))
 
+	// 服务端心跳 ping(见 nativeConsolePingInterval 注释):浏览器协议层
+	// 自动回 pong,读循环收到任何帧都会续期空闲超时,健康但无键入的会话
+	// 不再被误杀;写失败(半开连接)时退出心跳协程,由读循环超时收敛。
+	pingStop := make(chan struct{})
+	defer close(pingStop)
+	go func() {
+		ticker := time.NewTicker(nativeConsolePingInterval)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-pingStop:
+				return
+			case <-ticker.C:
+				if err := ws.writeFrame(0x9, nil); err != nil {
+					return
+				}
+			}
+		}
+	}()
+
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
@@ -143,14 +182,16 @@ func (s *simpleAdminServer) handleNativeConsoleWebSocket(w http.ResponseWriter, 
 			}
 		}
 	}()
-	// shell 退出后主循环可能正阻塞在读帧(最长 5 分钟空闲超时):立即把读
-	// 截止时刻置为当前,使读操作带超时返回、连接与协程及时释放,
-	// 前端也能立刻感知会话结束,而不是数分钟后才超时。
+	// shell 退出后主循环可能正阻塞在读帧:直接关闭连接让挂起与后续的读写
+	// 都立即返回(与 deferred Close 幂等),连接、协程与 shell 清理及时释放,
+	// 前端也能立刻感知会话结束。旧实现的一次性 SetReadDeadline 会被下一轮
+	// 读循环重新续期覆盖,清理最长延迟一个空闲超时周期(5 分钟)。
 	go func() {
 		<-done
-		_ = conn.SetReadDeadline(time.Now())
+		_ = conn.Close()
 	}()
 
+	lastAuthCheck := time.Now()
 	for {
 		opcode, payload, err := ws.readClientMessage()
 		if err != nil {
@@ -181,6 +222,19 @@ func (s *simpleAdminServer) handleNativeConsoleWebSocket(w http.ResponseWriter, 
 			_ = ws.writeFrame(0xA, payload)
 		case 0xA:
 		default:
+		}
+
+		// 会话周期复核:root shell 是权限最高的长连接,不能只在握手时鉴权
+		// 一次——会话过期、在别处登出、改密吊销后,存活的连接必须终止,
+		// 与 /api/ws 网关"每请求复核"的既定策略对齐(防护强度不能倒挂)。
+		// 复核按时间间隔节流:心跳 pong/键入帧都会唤醒主循环,顺带检查。
+		if time.Since(lastAuthCheck) >= nativeConsoleSessionRecheckInterval {
+			lastAuthCheck = time.Now()
+			if sessionToken == "" || !s.validateSession(sessionToken) {
+				log.Printf("console websocket 会话已失效,关闭 root shell 连接")
+				_ = ws.writeClose()
+				return
+			}
 		}
 
 		select {
@@ -353,6 +407,11 @@ func (ws *nativeWSConn) readClientFrame() (byte, bool, []byte, error) {
 		}
 		length = binary.BigEndian.Uint64(ext)
 	}
+	if !masked {
+		// RFC 6455 §5.1:客户端帧必须掩码,收到未掩码帧立即按协议错误
+		// 断连(该通道直通 root PTY,协议收敛必须最严格);浏览器恒掩码。
+		return 0, false, nil, fmt.Errorf("websocket client frame must be masked")
+	}
 	if opcode >= 0x8 && length > 125 {
 		// RFC 6455 §5.5:控制帧载荷不得超过 125 字节。接受超大 ping
 		// 并原样回 pong 会发出超限控制帧,严格客户端按帧错误断连。
@@ -425,6 +484,9 @@ func (ws *nativeWSConn) writeFrame(opcode byte, payload []byte) error {
 type nativeConsoleShell struct {
 	master *os.File
 	cmd    *exec.Cmd
+	// exited 在 cmd.Wait 回收进程后关闭:close() 据此判断进程组是否已消亡,
+	// 已回收则绝不再对 -pid 发信号(见 close 注释)。
+	exited chan struct{}
 }
 
 func startNativeConsoleShell(rows, cols uint16) (*nativeConsoleShell, error) {
@@ -449,8 +511,9 @@ func startNativeConsoleShell(rows, cols uint16) (*nativeConsoleShell, error) {
 	}
 	_ = slave.Close()
 
-	shell := &nativeConsoleShell{master: master, cmd: cmd}
+	shell := &nativeConsoleShell{master: master, cmd: cmd, exited: make(chan struct{})}
 	go func() {
+		defer close(shell.exited)
 		_ = cmd.Wait()
 		_ = master.Close()
 	}()
@@ -462,6 +525,12 @@ func startNativeConsoleShell(rows, cols uint16) (*nativeConsoleShell, error) {
 // 对 -pid 发信号才能连带的杀掉它拉起的子进程(top、sleep 等),
 // 只杀 shell 本体可能留下孤儿进程继续占用 PTY。
 // 连接超时、客户端断开、登出失败都会走到这里。
+//
+// 进程已被 Wait 协程回收(exited 已关闭)时绝不再发信号:syscall.Kill(-pid)
+// 绕过了 os.Process 的 ErrProcessDone 保护,pid 被复用时(本服务每次 AT
+// 写入都 fork 一个 Setpgid 的短命进程组,嵌入式 pid_max 默认 32768,复用
+// 很快)SIGKILL 会误杀无关进程组。关闭 master 本身会让内核向 PTY 前台
+// 进程组发 SIGHUP,覆盖 shell 仍存活的常规清理场景。
 func (s *nativeConsoleShell) close() {
 	if s == nil {
 		return
@@ -469,12 +538,30 @@ func (s *nativeConsoleShell) close() {
 	if s.master != nil {
 		_ = s.master.Close()
 	}
-	if s.cmd != nil && s.cmd.Process != nil {
-		pid := s.cmd.Process.Pid
-		_ = syscall.Kill(-pid, syscall.SIGHUP)
-		time.Sleep(100 * time.Millisecond)
-		_ = syscall.Kill(-pid, syscall.SIGKILL)
+	if s.cmd == nil || s.cmd.Process == nil || s.exited == nil {
+		return
 	}
+	select {
+	case <-s.exited:
+		return
+	default:
+	}
+	pid := s.cmd.Process.Pid
+	_ = syscall.Kill(-pid, syscall.SIGHUP)
+	select {
+	case <-s.exited:
+		return
+	case <-time.After(100 * time.Millisecond):
+	}
+	// SIGHUP 等待期内进程可能已退出并被回收,再查一次后才允许 SIGKILL;
+	// 检查与发信号之间的纳秒级窗口无法根除(需 pidfd),但相比旧实现
+	// "回收后最长 5 分钟仍无条件 kill" 已把误杀窗口压缩到可忽略。
+	select {
+	case <-s.exited:
+		return
+	default:
+	}
+	_ = syscall.Kill(-pid, syscall.SIGKILL)
 }
 
 func nativeConsoleShellPath() string {

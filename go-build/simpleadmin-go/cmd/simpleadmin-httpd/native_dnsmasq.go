@@ -10,7 +10,6 @@ import (
 	"os"
 	"os/exec"
 	"strings"
-	"sync"
 	"time"
 )
 
@@ -19,18 +18,6 @@ const (
 	systemctlCommand = "systemctl"
 	killallCommand   = "killall"
 )
-
-// dnsUpstreamMu 保护 applyDNSUpstream"取旧内容快照→写包含文件→注入标记→校验→
-// 重启,失败回滚"的整体互斥,防止并发请求交错:该函数可被页面保存处理器与开机
-// 自愈协程并发触发,也可被两个并发保存触发;交错时一方失败回滚(写回自己入口读
-// 到的旧内容)会覆盖另一方刚写入的新包含文件。与 macBindMu 同一意图:锁加在
-// applyDNSUpstream 自身内部,一次性覆盖所有调用点(页面保存与开机自愈),
-// 调用方无需各自加锁,避免遗漏。锁内包含回滚;锁外无状态操作。持锁横跨外部
-// 命令(语法校验与重启可能数秒)是必要的:事务必须整体成功或整体回滚,
-// 半途放开锁会让快照与写入结果不再一一对应。
-// 并发语义说明:applyDNSUpstream 的文件路径为常量、外部命令为直接 exec,
-// 无可注入桩,无法在单测中真实并发调用,串行性由本锁保证。
-var dnsUpstreamMu sync.Mutex
 
 // runDnsmasqCommand 执行 dnsmasq 自身命令(如 --test 语法校验),15 秒超时,
 // 返回合并输出与带命令上下文的错误。
@@ -147,23 +134,20 @@ func ensureDnsmasqMarker() error {
 	return nil
 }
 
-// applyDNSUpstream 按固定顺序应用上游 DNS 设置:① 先写包含文件,避免 dnsmasq
-// 因缺失的 conf-file 启动失败;② 注入标记块;③ 语法校验,失败则不重启;
-// ④ 重启单元使配置链生效。
+// applyDNSUpstreamLocked 按固定顺序应用上游 DNS 设置:① 先写包含文件,避免
+// dnsmasq 因缺失的 conf-file 启动失败;② 注入标记块;③ 语法校验,失败则不
+// 重启;④ 重启单元使配置链生效。
 // 回滚语义:写新内容前先取旧内容快照(优先包含文件磁盘实际内容;不存在或不可读
 // 时按保存状态渲染,状态读取失败按禁用态渲染)。注入标记后任何一步(校验或重启,
 // 以及标记注入本身)失败都把包含文件回滚为旧内容,保证失败后"磁盘 == 运行 ==
 // 状态文件"三者仍是旧值、保持一致(状态文件由调用方在本函数成功后才写入);
 // 否则磁盘已是新值而运行中仍是旧配置,任何外部 dnsmasq 重启都会加载被拒绝的
 // 配置。回滚本身失败仅告警,原错误照常返回。
-// 并发:整体由 dnsUpstreamMu 串行化,函数内加锁,一次性覆盖页面保存与开机
-// 自愈两个调用点。
-func applyDNSUpstream(enabled bool, servers []string) error {
-	// 整个事务(含回滚)互斥,见 dnsUpstreamMu 注释:并发交错时一方回滚会
-	// 覆盖另一方刚写入的新配置。
-	dnsUpstreamMu.Lock()
-	defer dnsUpstreamMu.Unlock()
-
+// 并发:调用方必须持有 dnsUpstreamMu(见其注释),锁范围必须覆盖调用方的完整
+// 事务(保存侧含状态写入,自愈侧含状态读取),本函数自身不加锁。
+// 并发语义说明:本函数的文件路径为常量、外部命令为直接 exec,无可注入桩,
+// 无法在单测中真实并发调用,串行性由 dnsUpstreamMu 保证。
+func applyDNSUpstreamLocked(enabled bool, servers []string) error {
 	var oldContent string
 	if data, err := os.ReadFile(dnsmasqIncludePath); err == nil {
 		oldContent = string(data)
@@ -193,6 +177,13 @@ func applyDNSUpstream(enabled bool, servers []string) error {
 	}
 	if err := restartDnsmasqUnit(); err != nil {
 		rollback()
+		// restart = stop + start:失败时服务很可能已被停掉而新进程没起来,
+		// 只回滚磁盘文件会停留在"磁盘=旧配置、服务=未运行"的不一致态,
+		// 本机 DNS/静态租约中断直到外部事件才恢复。回滚后再用旧配置拉起
+		// 一次;恢复也失败则严重告警(此时 DNS 服务不可用),原错误照常返回。
+		if restartErr := restartDnsmasqUnit(); restartErr != nil {
+			log.Printf("严重: 上游 DNS 重启失败且按旧配置恢复 dnsmasq 也失败,DNS 服务可能已停止: 原始错误: %v, 恢复错误: %v", err, restartErr)
+		}
 		return err
 	}
 	return nil
@@ -215,7 +206,11 @@ func dnsUpstreamAppliedConsistent(state dnsUpstreamState) bool {
 
 // reconcileDNSUpstreamAtStartup 开机自愈:固件重置可能抹掉厂商配置里的标记块,
 // 按已保存状态重新对齐;未启用时不做任何事,失败仅告警不阻断启动。
+// "读状态→复验→应用"整体持有 dnsUpstreamMu:自愈协程与开机后立刻到达的
+// 保存请求并发时,锁外读取的旧状态可能在保存之后才被应用,静默回滚用户设置。
 func reconcileDNSUpstreamAtStartup() {
+	dnsUpstreamMu.Lock()
+	defer dnsUpstreamMu.Unlock()
 	state, err := readDNSUpstreamState()
 	if err != nil {
 		log.Printf("读取上游 DNS 状态失败,跳过开机自愈: %v", err)
@@ -224,13 +219,23 @@ func reconcileDNSUpstreamAtStartup() {
 	if !state.Enabled {
 		return
 	}
+	// 状态文件可能损坏/被旧版本或手工编辑污染:自愈路径必须与 HTTP 保存
+	// 路径同等校验强度。包含文件按 server=<值> 逐行渲染,JSON 字符串可
+	// 携带换行注入任意 dnsmasq 指令(如 address= 域名劫持)并通过语法
+	// 校验后重启生效;逐项复验(合法性/去重/数量上限),非法即跳过自愈。
+	servers, err := validateDNSServerList(strings.Join(state.Servers, ","))
+	if err != nil {
+		log.Printf("已保存的上游 DNS 服务器非法,跳过开机自愈: %v", err)
+		return
+	}
+	state.Servers = servers
 	if dnsUpstreamAppliedConsistent(state) {
 		// 已启用且设备现状与状态一致:直接返回,避免每次服务重启都重启
 		// dnsmasq 单元造成一次 DNS 瞬断。
 		log.Printf("上游 DNS 配置与保存状态一致,跳过重启 %s", dnsmasqUnitName)
 		return
 	}
-	if err := applyDNSUpstream(state.Enabled, state.Servers); err != nil {
+	if err := applyDNSUpstreamLocked(state.Enabled, state.Servers); err != nil {
 		log.Printf("开机自愈上游 DNS 设置失败: %v", err)
 	}
 }

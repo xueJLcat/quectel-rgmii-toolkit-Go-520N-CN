@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"net"
 	"net/http"
@@ -54,8 +55,11 @@ func (s *simpleAdminServer) handleGetTTLStatus(w http.ResponseWriter, r *http.Re
 }
 
 func (s *simpleAdminServer) handleSetTTL(w http.ResponseWriter, r *http.Request) {
-	raw := r.URL.Query().Get("ttlvalue")
-	ttl, err := strconv.Atoi(stripNonDigits(raw))
+	raw := strings.TrimSpace(r.URL.Query().Get("ttlvalue"))
+	// 严格解析原始值,不做 stripNonDigits 预清洗:清洗会把 "-1" 洗成 "1"、
+	// "6.5" 洗成 "65",负数范围校验永不可达——ttlvalue=-1(常见的"关闭"
+	// 语义输入)被静默应用为 TTL=1(出站包一跳即丢,等效断网)且持久化重放。
+	ttl, err := strconv.Atoi(raw)
 	if err != nil || ttl < 0 || ttl > 255 {
 		writeJSON(w, http.StatusOK, map[string]any{"ok": false, "error": "invalid ttlvalue", "debug_logs": []string{"invalid ttlvalue"}})
 		return
@@ -223,13 +227,136 @@ func (s *simpleAdminServer) handleSetSMSWebhook(w http.ResponseWriter, r *http.R
 	} else if len(requestValues(r, "url")) > 0 {
 		cfg.URL = strings.TrimSpace(requestValue(r, "url"))
 	}
+	if len(requestValues(r, "method")) > 0 {
+		cfg.Method = strings.ToUpper(strings.TrimSpace(requestValue(r, "method")))
+	}
+	// headers/template 与 url 同语义:提交空值视为清除(URL query 优先,
+	// 表单空值同样按存在性判定)。
+	if value, ok := r.URL.Query()["headers"]; ok {
+		cfg.Headers = value[0]
+	} else if len(requestValues(r, "headers")) > 0 {
+		cfg.Headers = requestValue(r, "headers")
+	}
+	if value, ok := r.URL.Query()["template"]; ok {
+		cfg.Template = value[0]
+	} else if len(requestValues(r, "template")) > 0 {
+		cfg.Template = requestValue(r, "template")
+	}
+	if len(requestValues(r, "timeoutSec")) > 0 {
+		raw := strings.TrimSpace(requestValue(r, "timeoutSec"))
+		if raw == "" {
+			cfg.TimeoutSec = 0
+		} else {
+			parsed, err := strconv.Atoi(raw)
+			if err != nil {
+				writeJSON(w, http.StatusBadRequest, map[string]any{"ok": false, "error": "timeoutSec 必须是整数"})
+				return
+			}
+			cfg.TimeoutSec = parsed
+		}
+	}
 	if err := writeSMSWebhookConfig(cfg); err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]any{"ok": false, "error": err.Error()})
 		return
 	}
-	// 按新配置启停后台轮询器：启用即开始周期检测，关闭立即停止。
+	// 按新配置启停后台轮询器：任一通道启用即开始周期检测，全部关闭立即停止。
 	syncSMSWebhookPoller(s)
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
+}
+
+func (s *simpleAdminServer) handleGetSMSServerChan(w http.ResponseWriter, r *http.Request) {
+	writeJSON(w, http.StatusOK, currentSMSServerChanStatus())
+}
+
+func (s *simpleAdminServer) handleSetSMSServerChan(w http.ResponseWriter, r *http.Request) {
+	cfg, _ := readSMSServerChanConfig()
+	if len(requestValues(r, "enabled")) > 0 {
+		cfg.Enabled = boolQuery(r, "enabled", cfg.Enabled)
+	}
+	// sendKey 空值 = 清除,与 webhook url 同语义。
+	if value, ok := r.URL.Query()["sendKey"]; ok {
+		cfg.SendKey = strings.TrimSpace(value[0])
+	} else if len(requestValues(r, "sendKey")) > 0 {
+		cfg.SendKey = strings.TrimSpace(requestValue(r, "sendKey"))
+	}
+	if err := writeSMSServerChanConfig(cfg); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"ok": false, "error": err.Error()})
+		return
+	}
+	syncSMSWebhookPoller(s)
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
+}
+
+// smsForwardTestPayload 测试推送用的样例载荷(字段与真实转发一致)。
+func smsForwardTestPayload() map[string]any {
+	return map[string]any{
+		"sender":  "+8613800000000",
+		"date":    time.Now().Format("2006-01-02 15:04:05"),
+		"text":    "这是 SimpleAdmin 短信转发发出的一条测试消息",
+		"index":   0,
+		"storage": "ME",
+	}
+}
+
+// handleTestSMSForward 按 channel(webhook/serverchan)用当前已保存的配置
+// 同步发送一条测试消息(单次尝试,不重试,便于页面即时反馈)。业务失败以
+// 200 + {ok:false,error} 返回(与 sms_data 口径一致),错误文本不含 SendKey。
+func (s *simpleAdminServer) handleTestSMSForward(w http.ResponseWriter, r *http.Request) {
+	fail := func(message string) {
+		writeJSON(w, http.StatusOK, map[string]any{"ok": false, "error": message})
+	}
+	switch strings.ToLower(strings.TrimSpace(requestValue(r, "channel"))) {
+	case "webhook":
+		cfg, err := readSMSWebhookConfig()
+		if err != nil {
+			fail("读取 Webhook 配置失败: " + err.Error())
+			return
+		}
+		if cfg.URL == "" {
+			fail("请先填写 Webhook 地址并保存")
+			return
+		}
+		rq, err := buildSMSWebhookRequest(cfg, smsForwardTestPayload())
+		if err != nil {
+			fail(err.Error())
+			return
+		}
+		if err := smsWebhookPost(rq); err != nil {
+			fail("Webhook 请求失败: " + err.Error())
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"ok": true})
+	case "serverchan":
+		cfg, err := readSMSServerChanConfig()
+		if err != nil {
+			fail("读取 Server酱 配置失败: " + err.Error())
+			return
+		}
+		if cfg.SendKey == "" {
+			fail("请先填写 SendKey 并保存")
+			return
+		}
+		apiURL, err := serverChanSendURL(cfg.SendKey)
+		if err != nil {
+			fail(err.Error())
+			return
+		}
+		body, err := json.Marshal(map[string]string{
+			"title": sanitizeServerChanTitle("SimpleAdmin 测试推送"),
+			"desp":  "**测试消息**：短信转发 Server酱 通道配置成功。\n\n发送时间：" + time.Now().Format("2006-01-02 15:04:05"),
+		})
+		if err != nil {
+			fail(err.Error())
+			return
+		}
+		if err := serverChanPost(apiURL, body); err != nil {
+			fail(err.Error())
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"ok": true})
+	default:
+		writeJSON(w, http.StatusBadRequest, map[string]any{"ok": false, "error": "unknown test channel"})
+	}
 }
 
 func currentTTLValue() (int, bool) {
@@ -240,15 +367,42 @@ func currentTTLValue() (int, bool) {
 	return v, true
 }
 
-// dialAnyTarget 对目标列表逐个发起 TCP 拨号,任一成功即返回 true。
+// dialAnyTarget 对目标列表并行发起 TCP 拨号,任一成功即返回 true。
 // 供 /api/get_ping、总览探测与看门狗联网检测共用。
+// 并行而非串行:串行拨号在总预算 ≤ 单目标超时的调用点(总览 1.5s、
+// get_ping 2s)会被首目标截断——首目标以"丢包超时"方式不可达(跨网阻断
+// 的典型形态,正是需要备用目标的场景)时,后续目标的 DialContext 因预算
+// 耗尽立即失败,多目标冗余形同虚设,持续误报"未连接"(看门狗路径曾以
+// watchdogProbeBudget 放大预算修复过同款缺陷)。并行拨号让每个目标都
+// 获得完整的 dialTargetTimeout,总耗时不超过单目标超时,首个成功即取消
+// 其余拨号;ctx 到期/取消时按当前结果返回。
 func dialAnyTarget(ctx context.Context, targets []string) bool {
+	if len(targets) == 0 {
+		return false
+	}
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	results := make(chan bool, len(targets))
 	for _, address := range targets {
-		d := net.Dialer{Timeout: dialTargetTimeout}
-		conn, err := d.DialContext(ctx, "tcp", address)
-		if err == nil {
-			_ = conn.Close()
-			return true
+		go func(address string) {
+			d := net.Dialer{Timeout: dialTargetTimeout}
+			conn, err := d.DialContext(ctx, "tcp", address)
+			if err == nil {
+				_ = conn.Close()
+				results <- true
+				return
+			}
+			results <- false
+		}(address)
+	}
+	for remaining := len(targets); remaining > 0; remaining-- {
+		select {
+		case ok := <-results:
+			if ok {
+				return true
+			}
+		case <-ctx.Done():
+			return false
 		}
 	}
 	return false

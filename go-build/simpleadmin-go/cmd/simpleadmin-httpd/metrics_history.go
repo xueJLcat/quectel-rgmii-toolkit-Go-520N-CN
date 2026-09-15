@@ -7,16 +7,20 @@ import (
 
 // metricsHistoryPoint 是单条历史采样,字段保持紧凑以控制 JSON 体积。
 // Timestamp 为 Unix 秒;速率字段为两次采样间的增量换算出的平均 bytes/s。
+// 数值字段不加 omitempty:记录的都是"就绪"的真实采样,0 是合法观测值
+// (空闲期速率 0、无信号期信号 0%),omitempty 会把它们从 JSON 中删掉,
+// 前端把"字段缺失"映射为 null,趋势图上合法零点变成断线缺口,与 meta
+// 行"0 B/s"的显示自相矛盾,"信号掉到 0"这一关键事实不可见。
 type metricsHistoryPoint struct {
 	Timestamp      int64 `json:"t"`
-	CPUPercent     int   `json:"cpu,omitempty"`
-	RAMPercent     int   `json:"ram,omitempty"`
-	SignalPercent  int   `json:"sig,omitempty"`
-	RsrpBest       int   `json:"rsrp,omitempty"`
-	RxBytesTotal   int64 `json:"rx,omitempty"`
-	TxBytesTotal   int64 `json:"tx,omitempty"`
-	RxRateBytesSec int64 `json:"rxr,omitempty"`
-	TxRateBytesSec int64 `json:"txr,omitempty"`
+	CPUPercent     int   `json:"cpu"`
+	RAMPercent     int   `json:"ram"`
+	SignalPercent  int   `json:"sig"`
+	RsrpBest       int   `json:"rsrp"`
+	RxBytesTotal   int64 `json:"rx"`
+	TxBytesTotal   int64 `json:"tx"`
+	RxRateBytesSec int64 `json:"rxr"`
+	TxRateBytesSec int64 `json:"txr"`
 }
 
 const (
@@ -54,6 +58,22 @@ func recordMetricsHistoryFromDashboard(data map[string]any) {
 
 	if n := len(metricsHistory.points); n > 0 {
 		prev := metricsHistory.points[n-1]
+		// 向前断层上限 = 缓冲保留期(1440 点 × 1 分钟 = 24 小时):相邻采样
+		// 的墙钟间隔超过保留期,要么时钟被向前步进(冷启动校时,1970/构建
+		// 日期跳到真实年代可达数十年),要么是超出保留承诺的陈旧会话残留。
+		// 两种情形下旧时间轴都已失效:继续追加会让趋势图 x 轴横跨两个年代
+		// (有效数据全部挤压在右缘,桥接点速率恒 0),且旧年代点要按每分钟
+		// 一条的节奏 24 小时后才被挤出。与向后步进同款处理:丢弃重新开始。
+		maxGapSeconds := int64((metricsHistoryCapacity * metricsHistoryMinInterval) / time.Second)
+		if point.Timestamp <= prev.Timestamp || point.Timestamp-prev.Timestamp > maxGapSeconds {
+			// 时钟被向后步进(NTP 校时/故障)时继续追加还会产生时间倒序的
+			// 点(趋势图 x 轴回折)。采样间隔闸门走单调钟不受影响,
+			// 下一分钟即恢复记录。
+			metricsHistory.points = metricsHistory.points[:0]
+			metricsHistory.points = append(metricsHistory.points, point)
+			metricsHistory.last = now
+			return
+		}
 		elapsed := point.Timestamp - prev.Timestamp
 		if elapsed > 0 {
 			if dRx := point.RxBytesTotal - prev.RxBytesTotal; dRx > 0 {

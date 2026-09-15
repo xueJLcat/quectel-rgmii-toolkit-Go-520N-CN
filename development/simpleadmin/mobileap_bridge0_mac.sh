@@ -144,6 +144,11 @@ validate_mobileap_cfg_tmp() {
     local mac="$3"
 
     [ -s "$tmp" ] || return 1
+    # 截断防护:/usrdata 写满或 IO 错误时 sed 输出可能中途截断,而目标行
+    # 位于文件前部,grep 校验照样通过、mv 原子替换后配置损坏(自愈路径只
+    # 认"空文件",非空损坏永不恢复)。本脚本只做行内替换不删行,行数不得
+    # 少于原文件。
+    [ "$(wc -l < "$tmp")" -ge "$(wc -l < "$MOBILEAP_CFG_FILE")" ] || return 1
     case "$kind" in
         apmac)
             grep -q "<APMACAddress>${mac}</APMACAddress>" "$tmp" 2>/dev/null

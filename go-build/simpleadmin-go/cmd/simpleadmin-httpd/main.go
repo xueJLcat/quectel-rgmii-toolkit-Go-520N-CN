@@ -167,6 +167,17 @@ func runServeCommand(args []string) {
 		log.Fatalf("初始化认证文件失败: %v", err)
 	}
 
+	// fatal 前置校验先行、副作用后置(与 validateStaticDir/ensureAuthFile 同一
+	// 约定):TLS 证书初始化失败必须在任何设备/内核副作用(iptables 重放、
+	// 调度器首轮补跑判定、轮询器、AT 代理)发生之前退出。旧顺序把证书初始化
+	// 排在最后,失败时进程已执行过一轮开机动作,systemd 拉起后重复执行,
+	// 形成"每轮循环先触发副作用再自杀"的重启风暴。
+	if !cfg.noTLS {
+		if err := ensureManagedTLSCertificate(cfg.certFile, cfg.keyFile, cfg.caCertFile, cfg.caKeyFile); err != nil {
+			log.Fatalf("初始化 HTTPS 证书失败: %v", err)
+		}
+	}
+
 	if !cfg.mockMode {
 		log.Printf("AT APIs use direct /dev/smd11 access")
 		applySavedTTLAtStartup()
@@ -201,26 +212,35 @@ func runServeCommand(args []string) {
 
 	if cfg.noTLS {
 		log.Printf("ZBIMS HTTP 服务启动: %s", cfg.httpAddr)
-		log.Fatal(http.ListenAndServe(cfg.httpAddr, handler))
+		log.Fatal(newHTTPServer(cfg.httpAddr, handler).ListenAndServe())
 		return
-	}
-
-	if err := ensureManagedTLSCertificate(cfg.certFile, cfg.keyFile, cfg.caCertFile, cfg.caKeyFile); err != nil {
-		log.Fatalf("初始化 HTTPS 证书失败: %v", err)
 	}
 
 	go func() {
 		redirectHandler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			http.Redirect(w, r, httpsRedirectLocation(cfg.httpsAddr, r), http.StatusMovedPermanently)
+			// 308 而不是 301:301 允许客户端把 POST 改写为 GET,经 :80 入口
+			// 提交的登录/表单会被重写成 GET 打到只收 POST 的端点上得到 405;
+			// 308(RFC 7538)保持方法与请求体不变。
+			http.Redirect(w, r, httpsRedirectLocation(cfg.httpsAddr, r), http.StatusPermanentRedirect)
 		})
 		log.Printf("HTTP 重定向服务启动: %s", cfg.httpAddr)
-		if err := http.ListenAndServe(cfg.httpAddr, redirectHandler); err != nil && !errors.Is(err, http.ErrServerClosed) {
+		if err := newHTTPServer(cfg.httpAddr, redirectHandler).ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
 			log.Fatalf("HTTP 重定向服务退出: %v", err)
 		}
 	}()
 
 	log.Printf("ZBIMS HTTPS 服务启动: %s", cfg.httpsAddr)
-	log.Fatal(http.ListenAndServeTLS(cfg.httpsAddr, cfg.certFile, cfg.keyFile, handler))
+	log.Fatal(newHTTPServer(cfg.httpsAddr, handler).ListenAndServeTLS(cfg.certFile, cfg.keyFile))
+}
+
+// newHTTPServer 构造带请求头读取超时的监听服务:http.ListenAndServe(TLS)
+// 的零值 Server 无任何超时,LAN 上未认证客户端以极慢速率发送请求头
+// (Slowloris)即可让每条连接永久占用一个协程与 fd,在小内存/低 fd 上限
+// 的设备上耗尽资源拒绝服务。只设 ReadHeaderTimeout:整体 ReadTimeout 会
+// 破坏长连接语义,IdleTimeout 需大于前端保活间隔;WS 连接 Hijack 后不受
+// Server 超时影响,无需顾虑。
+func newHTTPServer(addr string, handler http.Handler) *http.Server {
+	return &http.Server{Addr: addr, Handler: handler, ReadHeaderTimeout: 10 * time.Second}
 }
 
 // httpsRedirectLocation builds the HTTPS redirect target for an HTTP request.
@@ -230,6 +250,12 @@ func runServeCommand(args []string) {
 func httpsRedirectLocation(httpsAddr string, r *http.Request) string {
 	host := r.Host
 	if h, _, err := net.SplitHostPort(host); err == nil {
+		// IPv6 字面量 Host 带显式端口时,SplitHostPort 返回剥掉方括号的裸
+		// 地址;URL 中的 IPv6 必须带方括号,否则拼出无法解析的 Location,
+		// IPv6 管理访问的 HTTP→HTTPS 重定向整体失效。
+		if strings.Contains(h, ":") {
+			h = "[" + h + "]"
+		}
 		host = h
 	}
 	if port := httpsListenPort(httpsAddr); port != "" && port != "443" {

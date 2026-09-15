@@ -1,13 +1,22 @@
 [Unit]
 Description=SimpleAdmin Go HTTP Service
 After=network.target
+# /usrdata 为持久分区:单元先于其挂载运行时,ExecStartPre/ExecStart 找不到
+# 二进制与 www,直接进入失败循环。
+RequiresMountsFor=/usrdata
+# 崩溃循环防护:默认 StartLimitIntervalSec=10s/Burst=5 与 RestartSec=2 +
+# 秒级 ExecStartPre 组合下,持续崩溃的周期(≈3.5s+)永远撞不上限速窗口,
+# 单元无限重启(每轮 prepare 反复击杀厂商 Web 进程、刷写 flash);显式放宽
+# 窗口让持续失败落入 failed 终态,可被 systemctl status/安装探活发现。
+StartLimitIntervalSec=120
+StartLimitBurst=5
 
 [Service]
 Type=simple
 ExecStartPre=/usrdata/simpleadmin/prepare_simpleadmin_ports.sh
 ExecStart=/usrdata/simpleadmin/simpleadmin-httpd -static /usrdata/simpleadmin/www -auth-file /usrdata/simpleadmin/simpleadmin.auth -http :80 -no-tls -at-devices-file /usrdata/simpleadmin/at_devices.conf
 Restart=on-failure
-RestartSec=2
+RestartSec=5
 
 [Install]
 WantedBy=multi-user.target

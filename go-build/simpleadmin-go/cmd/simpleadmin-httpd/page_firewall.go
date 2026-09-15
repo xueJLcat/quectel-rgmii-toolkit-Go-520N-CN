@@ -2,6 +2,7 @@
 package main
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log"
@@ -10,20 +11,41 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 )
+
+// firewallMu 把"读旧规则 → 应用内核 → 落盘"的保存事务整体互斥:WS 网关对
+// 每条消息独立协程分发,directAPI 模式天然并发,两个保存请求交错时一方的
+// flush 会冲掉另一方刚追加的规则,回滚序列也会互相踩踏,最终链内是两套规则
+// 的混合体而配置文件由最后落盘者决定,与内核背离(事务语义的前提是串行执行)。
+// 与 macBindMu/dnsUpstreamMu 的设计对齐。
+var firewallMu sync.Mutex
 
 const (
 	defaultFirewallPortsFile = "/usrdata/simpleadmin/firewall_ports.conf"
+	defaultFirewallFwdFile   = "/usrdata/simpleadmin/firewall_fwd.conf"
 	firewallMaxPorts         = 64
 	firewallMaxChainRules    = 300
+	firewallMaxFwdRules      = 32
 	firewallChainName        = "SADMIN_FW"
+	firewallFwdChainName     = "SADMIN_FWD"
 	firewallActionBlock      = "block"
 	firewallActionAccept     = "accept"
+	// 平台无关的二进制名(native_ttl.go 的同名常量仅 linux 构建可用)。
+	firewallIPTablesCommand  = "iptables"
+	firewallIP6TablesCommand = "ip6tables"
 )
+
+// firewallCommandRunner 执行防火墙管理命令(iptables/ip6tables)并返回合并输出;
+// 与 firewallExecutor 注入模式对齐,单测替换为 mock runner,不触碰真实内核规则。
+type firewallCommandRunner func(command string, args []string) (string, error)
 
 var (
 	runtimeFirewallPortsFile  = defaultFirewallPortsFile
+	runtimeFirewallFwdFile    = defaultFirewallFwdFile
 	firewallAllowedInterfaces = []string{"bridge0", "eth0", "tailscale0"}
+	// runtimeFirewallCommandRunner 默认为平台原生实现(非 Linux 恒报错),单测中替换。
+	runtimeFirewallCommandRunner firewallCommandRunner = runFirewallCommandOutput
 )
 
 // firewallRule 表示一条防火墙规则:端口 + 动作(阻止或放行)。
@@ -55,6 +77,15 @@ type firewallRuleEntry struct {
 	Extra       string `json:"extra"`
 }
 
+// firewallFwdRule 表示一条 DNAT 端口转发规则:外部端口 → 内网 IPv4:端口。
+type firewallFwdRule struct {
+	ExtPort int    `json:"extPort"`
+	IntIP   string `json:"intIP"`
+	IntPort int    `json:"intPort"`
+	Proto   string `json:"proto"`
+	Enabled bool   `json:"enabled"`
+}
+
 func isFirewallPortToken(value string) bool {
 	if value == "" {
 		return false
@@ -72,7 +103,21 @@ func isValidFirewallPort(port string) bool {
 	return err == nil && isFirewallPortToken(port) && value >= 1 && value <= 65535
 }
 
-// parseFirewallPorts 解析逗号分隔的端口列表:去重保序,空输入返回空列表(合法,表示清空)。
+// normalizeFirewallPort 校验并归一化端口,非法返回空串。前导零形态("080")
+// 与 "80" 在 iptables 的十进制语义下是同一端口,不归一化则基于字符串的
+// 去重与 block/accept 冲突检测都会被绕过:accept 080 + block 80 会先生成
+// 命中所有接口的 ACCEPT,其后的 DROP 永不可达——用户以为封了端口,实际
+// 全网放行,且 UI 同时显示两条规则"已保存"。
+func normalizeFirewallPort(port string) string {
+	if !isValidFirewallPort(port) {
+		return ""
+	}
+	value, _ := strconv.Atoi(port)
+	return strconv.Itoa(value)
+}
+
+// parseFirewallPorts 解析逗号分隔的端口列表:归一化(去前导零)后去重保序,
+// 空输入返回空列表(合法,表示清空)。
 func parseFirewallPorts(raw string) ([]string, error) {
 	ports := []string{}
 	seen := map[string]bool{}
@@ -81,14 +126,15 @@ func parseFirewallPorts(raw string) ([]string, error) {
 		if item == "" {
 			continue
 		}
-		if !isValidFirewallPort(item) {
+		port := normalizeFirewallPort(item)
+		if port == "" {
 			return nil, fmt.Errorf("无效的防火墙端口: %s", item)
 		}
-		if seen[item] {
+		if seen[port] {
 			continue
 		}
-		seen[item] = true
-		ports = append(ports, item)
+		seen[port] = true
+		ports = append(ports, port)
 	}
 	if len(ports) > firewallMaxPorts {
 		return nil, fmt.Errorf("防火墙端口数量 %d 超过上限 %d", len(ports), firewallMaxPorts)
@@ -97,7 +143,7 @@ func parseFirewallPorts(raw string) ([]string, error) {
 }
 
 // parseFirewallRuleLines 逐行解析规则文本:新格式 "<action> <port>",旧格式纯端口行视为
-// block;容错跳过空行与非法行,同端口同动作去重保序。
+// block;容错跳过空行与非法行,端口归一化后同端口同动作去重保序。
 func parseFirewallRuleLines(raw string) ([]firewallRule, error) {
 	rules := []firewallRule{}
 	seen := map[string]bool{}
@@ -115,9 +161,11 @@ func parseFirewallRuleLines(raw string) ([]firewallRule, error) {
 		if rule.Action != firewallActionBlock && rule.Action != firewallActionAccept {
 			continue
 		}
-		if !isValidFirewallPort(rule.Port) {
+		port := normalizeFirewallPort(rule.Port)
+		if port == "" {
 			continue
 		}
+		rule.Port = port
 		key := rule.Action + " " + rule.Port
 		if seen[key] {
 			continue
@@ -129,7 +177,8 @@ func parseFirewallRuleLines(raw string) ([]firewallRule, error) {
 }
 
 // validateFirewallRules 严格校验规则列表:动作必须为 block/accept、端口必须为 1-65535
-// 纯数字、同一端口不能同时阻止与放行、总数不超过上限;同端口同动作去重保序。
+// 纯数字(归一化去前导零,防 "080"/"80" 绕过冲突检测)、同一端口不能同时阻止与放行、
+// 总数不超过上限;同端口同动作去重保序。
 func validateFirewallRules(rules []firewallRule) ([]firewallRule, error) {
 	cleaned := []firewallRule{}
 	seen := map[string]bool{}
@@ -139,9 +188,11 @@ func validateFirewallRules(rules []firewallRule) ([]firewallRule, error) {
 		if rule.Action != firewallActionBlock && rule.Action != firewallActionAccept {
 			return nil, fmt.Errorf("无效的防火墙动作: %s", rule.Action)
 		}
-		if !isValidFirewallPort(rule.Port) {
+		port := normalizeFirewallPort(rule.Port)
+		if port == "" {
 			return nil, fmt.Errorf("无效的防火墙端口: %s", rule.Port)
 		}
+		rule.Port = port
 		key := rule.Action + " " + rule.Port
 		if seen[key] {
 			continue
@@ -213,18 +264,21 @@ func writeFirewallRulesFile(path string, rules []firewallRule) error {
 }
 
 // parseIPTablesCount 解析 iptables 计数,容错 K/M/G 后缀(-x 模式下为纯数字)。
+// 换算按 iptables(xtables_print_num)的 1000 进制:K=10^3、M=10^6、G=10^9,
+// 不是二进制的 1024 倍——本函数是去掉 -x 或解析外部 dump 时的容错路径,
+// 换算必须与 iptables 输出语义一致,否则命中统计系统性偏高。
 func parseIPTablesCount(value string) int64 {
 	multiplier := int64(1)
 	if value != "" {
 		switch value[len(value)-1] {
 		case 'K', 'k':
-			multiplier = 1024
+			multiplier = 1000
 			value = value[:len(value)-1]
 		case 'M', 'm':
-			multiplier = 1024 * 1024
+			multiplier = 1000 * 1000
 			value = value[:len(value)-1]
 		case 'G', 'g':
-			multiplier = 1024 * 1024 * 1024
+			multiplier = 1000 * 1000 * 1000
 			value = value[:len(value)-1]
 		}
 	}
@@ -392,6 +446,231 @@ func restoreFirewallRules(executor firewallExecutor, applyErr error, oldRules []
 	log.Printf("防火墙规则应用失败, 已按旧规则重建链 %s, 原始错误: %v", firewallChainName, applyErr)
 }
 
+// normalizeFirewallFwdRule 校验并归一化单条转发规则:端口 1-65535、内网地址必须为
+// 合法 IPv4、协议仅限 tcp/udp(大小写与首尾空白归一化)。
+func normalizeFirewallFwdRule(rule firewallFwdRule) (firewallFwdRule, error) {
+	rule.Proto = strings.ToLower(strings.TrimSpace(rule.Proto))
+	rule.IntIP = strings.TrimSpace(rule.IntIP)
+	if rule.ExtPort < 1 || rule.ExtPort > 65535 {
+		return rule, fmt.Errorf("无效的外部端口: %d", rule.ExtPort)
+	}
+	if rule.IntPort < 1 || rule.IntPort > 65535 {
+		return rule, fmt.Errorf("无效的内部端口: %d", rule.IntPort)
+	}
+	// 单播语义校验(与 dmz/lanip/mac_bind 同口径):0.0.0.0/组播/广播/
+	// 回环能通过 net.ParseIP 并被 iptables 接受写入 nat 链,保存"成功"
+	// 而 DNAT 实际指向黑洞,转发功能静默失效。
+	if !isUnicastIPv4(rule.IntIP) {
+		return rule, fmt.Errorf("无效的内网 IPv4 地址: %s", rule.IntIP)
+	}
+	if rule.Proto != "tcp" && rule.Proto != "udp" {
+		return rule, fmt.Errorf("无效的转发协议: %s", rule.Proto)
+	}
+	return rule, nil
+}
+
+// parseFirewallFwdRules 解析 fwd_save 的 rules 参数(JSON 数组字符串)并严格校验:
+// 数量不超过 firewallMaxFwdRules、逐条通过 normalizeFirewallFwdRule、
+// (外部端口, 协议) 唯一;任一不满足即整体拒绝。
+func parseFirewallFwdRules(raw string) ([]firewallFwdRule, error) {
+	var rules []firewallFwdRule
+	if err := json.Unmarshal([]byte(raw), &rules); err != nil {
+		return nil, fmt.Errorf("无效的转发规则 JSON: %v", err)
+	}
+	if len(rules) > firewallMaxFwdRules {
+		return nil, fmt.Errorf("转发规则数量 %d 超过上限 %d", len(rules), firewallMaxFwdRules)
+	}
+	cleaned := []firewallFwdRule{}
+	seen := map[string]bool{}
+	for i, rule := range rules {
+		clean, err := normalizeFirewallFwdRule(rule)
+		if err != nil {
+			return nil, fmt.Errorf("规则 %d: %v", i+1, err)
+		}
+		key := clean.Proto + " " + strconv.Itoa(clean.ExtPort)
+		if seen[key] {
+			return nil, fmt.Errorf("规则 %d: 重复的转发规则: %s 端口 %d", i+1, clean.Proto, clean.ExtPort)
+		}
+		seen[key] = true
+		cleaned = append(cleaned, clean)
+	}
+	return cleaned, nil
+}
+
+// parseFirewallFwdRuleLines 逐行解析转发规则文本("<外部端口> <协议> <内网IP> <内部端口> <1|0>"),
+// 容错跳过空行与非法行,(外部端口, 协议) 去重保序。
+func parseFirewallFwdRuleLines(raw string) []firewallFwdRule {
+	rules := []firewallFwdRule{}
+	seen := map[string]bool{}
+	for _, line := range strings.Split(raw, "\n") {
+		fields := strings.Fields(line)
+		if len(fields) != 5 || (fields[4] != "0" && fields[4] != "1") {
+			continue
+		}
+		extPort, err := strconv.Atoi(fields[0])
+		if err != nil {
+			continue
+		}
+		intPort, err := strconv.Atoi(fields[3])
+		if err != nil {
+			continue
+		}
+		clean, err := normalizeFirewallFwdRule(firewallFwdRule{
+			ExtPort: extPort, Proto: fields[1], IntIP: fields[2], IntPort: intPort, Enabled: fields[4] == "1",
+		})
+		if err != nil {
+			continue
+		}
+		key := clean.Proto + " " + strconv.Itoa(clean.ExtPort)
+		if seen[key] {
+			continue
+		}
+		seen[key] = true
+		rules = append(rules, clean)
+	}
+	return rules
+}
+
+// readFirewallFwdRulesFile 读取转发规则配置,容错跳过非法行;文件不存在视为空列表。
+func readFirewallFwdRulesFile(path string) ([]firewallFwdRule, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return []firewallFwdRule{}, nil
+		}
+		return nil, err
+	}
+	return parseFirewallFwdRuleLines(string(data)), nil
+}
+
+// writeFirewallFwdRulesFile 以临时文件+落盘+rename 约定原子写入转发规则配置
+// (复用 atomicWriteFile);enabled=false 的规则以 0 持久化,不写入链但重启后保留。
+func writeFirewallFwdRulesFile(path string, rules []firewallFwdRule) error {
+	var sb strings.Builder
+	for _, rule := range rules {
+		enabled := "0"
+		if rule.Enabled {
+			enabled = "1"
+		}
+		fmt.Fprintf(&sb, "%d %s %s %d %s\n", rule.ExtPort, rule.Proto, rule.IntIP, rule.IntPort, enabled)
+	}
+	return atomicWriteFile(path, []byte(sb.String()), 0644)
+}
+
+// firewallNatDumpChains 经注入点执行 iptables -t nat -vnL -x --line-numbers,
+// 复用 parseIPTablesChainDump 解析 nat 表链统计。
+func firewallNatDumpChains() ([]firewallChainInfo, error) {
+	out, err := runtimeFirewallCommandRunner(firewallIPTablesCommand, []string{"-t", "nat", "-vnL", "-x", "--line-numbers"})
+	if err != nil {
+		return nil, err
+	}
+	return parseIPTablesChainDump(out), nil
+}
+
+// firewallFwdStateFromChains 从 nat 表链统计判断 SADMIN_FWD 链是否存在、
+// PREROUTING 是否已挂载指向它的跳转。
+func firewallFwdStateFromChains(chains []firewallChainInfo) (chainExists, jumpInstalled bool) {
+	for _, chain := range chains {
+		switch chain.Name {
+		case firewallFwdChainName:
+			chainExists = true
+		case "PREROUTING":
+			for _, entry := range chain.Rules {
+				if entry.Target == firewallFwdChainName {
+					jumpInstalled = true
+				}
+			}
+		}
+	}
+	return chainExists, jumpInstalled
+}
+
+// firewallFwdIPTablesCommands 生成 nat 表命令序列:链/跳转缺失则先安装,随后 flush 链,
+// 再为 enabled 规则逐条重建 DNAT(enabled=false 仅持久化不写入链)。
+// 纯函数,新规则应用与失败后按旧规则重放恢复共用同一生成逻辑。
+func firewallFwdIPTablesCommands(chainExists, jumpInstalled bool, rules []firewallFwdRule) [][]string {
+	cmds := [][]string{}
+	if !chainExists {
+		cmds = append(cmds, []string{"-t", "nat", "-N", firewallFwdChainName})
+	}
+	if !jumpInstalled {
+		cmds = append(cmds, []string{"-t", "nat", "-I", "PREROUTING", "1", "-j", firewallFwdChainName})
+	}
+	cmds = append(cmds, []string{"-t", "nat", "-F", firewallFwdChainName})
+	for _, rule := range rules {
+		if !rule.Enabled {
+			continue
+		}
+		cmds = append(cmds, []string{"-t", "nat", "-A", firewallFwdChainName,
+			"-p", rule.Proto, "--dport", strconv.Itoa(rule.ExtPort),
+			"-j", "DNAT", "--to-destination", fmt.Sprintf("%s:%d", rule.IntIP, rule.IntPort)})
+	}
+	return cmds
+}
+
+// applyFirewallFwdRulesTransactional 以给定执行器完成"安装跳转 + 应用新规则 + 失败按
+// 旧规则重放"的事务,语义与 applyFirewallRulesTransactional 对齐:任一条失败立即停止,
+// 按旧规则重放恢复;恢复本身失败逐条告警,原错误照常返回,不吞错。
+func applyFirewallFwdRulesTransactional(executor firewallExecutor, chainExists, jumpInstalled bool, rules, oldRules []firewallFwdRule) error {
+	for _, args := range firewallFwdIPTablesCommands(chainExists, jumpInstalled, rules) {
+		if err := executor(args); err != nil {
+			restoreFirewallFwdRules(executor, err, oldRules)
+			return err
+		}
+	}
+	return nil
+}
+
+// restoreFirewallFwdRules 在应用失败后尽力按旧规则命令序列重建转发链(此时链与跳转
+// 视为已就位);恢复不完整说明链仍可能残缺,必须明确告警,不吞错。
+func restoreFirewallFwdRules(executor firewallExecutor, applyErr error, oldRules []firewallFwdRule) {
+	failed := 0
+	for _, args := range firewallFwdIPTablesCommands(true, true, oldRules) {
+		if err := executor(args); err != nil {
+			failed++
+			log.Printf("防火墙转发恢复旧规则命令失败: iptables %s: %v", strings.Join(args, " "), err)
+		}
+	}
+	if failed > 0 {
+		log.Printf("警告: 防火墙转发规则应用失败且旧规则恢复不完整(%d 条命令失败), 链 %s 可能处于残缺状态, 原始错误: %v",
+			failed, firewallFwdChainName, applyErr)
+		return
+	}
+	log.Printf("防火墙转发规则应用失败, 已按旧规则重建链 %s, 原始错误: %v", firewallFwdChainName, applyErr)
+}
+
+// applyFirewallFwdRules 以事务语义重建 nat 表 SADMIN_FWD 链:先转储 nat 表核对链与
+// PREROUTING 跳转状态(缺失则随命令序列一并安装),再 flush+重建 DNAT 规则,任一步
+// 失败按 oldRules 重放恢复。转储失败直接返回错误,绝不把未知状态伪装成未安装。
+func applyFirewallFwdRules(rules, oldRules []firewallFwdRule) error {
+	chains, err := firewallNatDumpChains()
+	if err != nil {
+		return err
+	}
+	chainExists, jumpInstalled := firewallFwdStateFromChains(chains)
+	executor := func(args []string) error {
+		_, err := runtimeFirewallCommandRunner(firewallIPTablesCommand, args)
+		return err
+	}
+	return applyFirewallFwdRulesTransactional(executor, chainExists, jumpInstalled, rules, oldRules)
+}
+
+// applySavedFirewallFwdAtStartup 启动时恢复已保存的 DNAT 转发规则,失败仅告警不阻断
+// 启动;无已知旧规则可回退时传 nil:失败把链重建为空,规则仍在配置文件,下次启动重试。
+func applySavedFirewallFwdAtStartup() {
+	rules, err := readFirewallFwdRulesFile(runtimeFirewallFwdFile)
+	if err != nil {
+		log.Printf("读取防火墙转发配置失败: %v", err)
+		return
+	}
+	if len(rules) == 0 {
+		return
+	}
+	if err := applyFirewallFwdRules(rules, nil); err != nil {
+		log.Printf("启动应用防火墙转发规则失败: %v", err)
+	}
+}
+
 func (s *simpleAdminServer) handleFirewallData(w http.ResponseWriter, r *http.Request) {
 	action := strings.TrimSpace(requestValue(r, "action"))
 	switch action {
@@ -410,13 +689,19 @@ func (s *simpleAdminServer) handleFirewallData(w http.ResponseWriter, r *http.Re
 		ruleCount := acceptCount + (len(rules)-acceptCount)*4
 		var chains []firewallChainInfo
 		jumpInstalled := false
+		chainsError := ""
 		if s.cfg.mockMode {
 			jumpInstalled = len(rules) > 0
 			chains = mockChainsForRules(rules)
 		} else {
 			dumped, err := firewallDumpChains()
 			if err != nil {
+				// 转储失败绝不伪装成"空链+跳转未安装":那样与真正未配置
+				// 防火墙的设备无法区分,运维会误判防火墙已失效。规则仍按
+				// 落盘文件返回,并以 chainsError 如实上报查询失败,
+				// 与 status6/fwd_list 的"查询失败不伪装空结果"契约一致。
 				log.Printf("读取防火墙链统计失败: %v", err)
+				chainsError = err.Error()
 			} else {
 				chains = dumped
 				jumpInstalled = firewallJumpInstalledFromChains(dumped)
@@ -425,12 +710,97 @@ func (s *simpleAdminServer) handleFirewallData(w http.ResponseWriter, r *http.Re
 		if chains == nil {
 			chains = []firewallChainInfo{}
 		}
-		writeJSON(w, http.StatusOK, map[string]any{
+		result := map[string]any{
 			"rules":         rules,
 			"ruleCount":     ruleCount,
 			"jumpInstalled": jumpInstalled,
 			"chains":        chains,
-		})
+		}
+		if chainsError != "" {
+			result["ok"] = false
+			result["chainsError"] = chainsError
+		}
+		writeJSON(w, http.StatusOK, result)
+	case "status6":
+		if s.cfg.mockMode {
+			// 与 status/fwd_list 的 mock 分支一致:mock 模式不触内核,
+			// 合成空的 IPv6 基础链(只读展示,无托管规则)。旧实现漏掉
+			// mockMode 判定,演示/开发机上会执行真实 ip6tables。
+			writeJSON(w, http.StatusOK, map[string]any{"ok": true, "chains": []firewallChainInfo{
+				{Name: "INPUT", Policy: "ACCEPT", Rules: []firewallRuleEntry{}},
+				{Name: "FORWARD", Policy: "ACCEPT", Rules: []firewallRuleEntry{}},
+				{Name: "OUTPUT", Policy: "ACCEPT", Rules: []firewallRuleEntry{}},
+			}})
+			return
+		}
+		// IPv6 链只读展示:经注入点执行 ip6tables,失败如实上报(200 ok:false),
+		// 绝不把查询失败伪装成空结果。
+		out, err := runtimeFirewallCommandRunner(firewallIP6TablesCommand, []string{"-vnL", "-x", "--line-numbers"})
+		if err != nil {
+			writeJSON(w, http.StatusOK, map[string]any{"ok": false, "error": err.Error()})
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"ok": true, "chains": parseIPTablesChainDump(out)})
+	case "fwd_list":
+		forwarded, err := readFirewallFwdRulesFile(runtimeFirewallFwdFile)
+		if err != nil {
+			writeJSON(w, http.StatusInternalServerError, map[string]any{"ok": false, "error": err.Error()})
+			return
+		}
+		jumpInstalled := false
+		if s.cfg.mockMode {
+			// mock 模式不触内核:与 status 相同思路合成"有启用规则即已安装跳转"。
+			for _, rule := range forwarded {
+				if rule.Enabled {
+					jumpInstalled = true
+					break
+				}
+			}
+		} else {
+			chains, err := firewallNatDumpChains()
+			if err != nil {
+				writeJSON(w, http.StatusOK, map[string]any{"ok": false, "error": err.Error()})
+				return
+			}
+			_, jumpInstalled = firewallFwdStateFromChains(chains)
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"ok": true, "forwarded": forwarded, "jumpInstalled": jumpInstalled})
+	case "fwd_save":
+		rules, err := parseFirewallFwdRules(requestValue(r, "rules"))
+		if err != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]any{"ok": false, "error": err.Error()})
+			return
+		}
+		firewallMu.Lock()
+		defer firewallMu.Unlock()
+		if !s.cfg.mockMode {
+			// 先读出当前落盘的旧规则:应用中途失败时按旧规则重放恢复 nat 链,
+			// 只有应用成功才落盘,保证内核与配置文件不背离。
+			oldRules, err := readFirewallFwdRulesFile(runtimeFirewallFwdFile)
+			if err != nil {
+				writeJSON(w, http.StatusInternalServerError, map[string]any{"ok": false, "error": err.Error()})
+				return
+			}
+			if err := applyFirewallFwdRules(rules, oldRules); err != nil {
+				writeJSON(w, http.StatusOK, map[string]any{"ok": false, "error": err.Error()})
+				return
+			}
+			if err := writeFirewallFwdRulesFile(runtimeFirewallFwdFile, rules); err != nil {
+				// 内核已应用新规则而落盘失败:按旧规则回滚内核再报错,
+				// 否则"保存失败"的响应下新规则实际生效,且下次进程重启会
+				// 按旧文件把内核改回去,规则漂移(违反自身"不背离"契约)。
+				log.Printf("防火墙转发规则落盘失败,回滚内核: %v", err)
+				if rollbackErr := applyFirewallFwdRules(oldRules, oldRules); rollbackErr != nil {
+					log.Printf("警告: 防火墙转发规则回滚失败,内核为未持久化的新规则: %v", rollbackErr)
+				}
+				writeJSON(w, http.StatusInternalServerError, map[string]any{"ok": false, "error": err.Error()})
+				return
+			}
+		} else if err := writeFirewallFwdRulesFile(runtimeFirewallFwdFile, rules); err != nil {
+			writeJSON(w, http.StatusInternalServerError, map[string]any{"ok": false, "error": err.Error()})
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"ok": true, "rules": rules})
 	case "save":
 		blockPorts, err := parseFirewallPorts(requestValue(r, "block_ports"))
 		if err != nil {
@@ -454,6 +824,8 @@ func (s *simpleAdminServer) handleFirewallData(w http.ResponseWriter, r *http.Re
 			writeJSON(w, http.StatusBadRequest, map[string]any{"ok": false, "error": err.Error()})
 			return
 		}
+		firewallMu.Lock()
+		defer firewallMu.Unlock()
 		if !s.cfg.mockMode {
 			// 先读出当前落盘的旧规则:应用中途失败时按旧规则重放恢复内核链,
 			// 只有应用成功才落盘,保证内核与配置文件不背离。
@@ -466,8 +838,18 @@ func (s *simpleAdminServer) handleFirewallData(w http.ResponseWriter, r *http.Re
 				writeJSON(w, http.StatusOK, map[string]any{"ok": false, "error": err.Error()})
 				return
 			}
-		}
-		if err := writeFirewallRulesFile(runtimeFirewallPortsFile, rules); err != nil {
+			if err := writeFirewallRulesFile(runtimeFirewallPortsFile, rules); err != nil {
+				// 内核已应用新规则而落盘失败:按旧规则回滚内核再报错,
+				// 否则"保存失败"的响应下新规则实际生效(安全语义反转),
+				// 且下次进程重启会按旧文件把内核改回去,规则漂移。
+				log.Printf("防火墙规则落盘失败,回滚内核: %v", err)
+				if rollbackErr := applyFirewallRules(oldRules, oldRules); rollbackErr != nil {
+					log.Printf("警告: 防火墙规则回滚失败,内核为未持久化的新规则: %v", rollbackErr)
+				}
+				writeJSON(w, http.StatusInternalServerError, map[string]any{"ok": false, "error": err.Error()})
+				return
+			}
+		} else if err := writeFirewallRulesFile(runtimeFirewallPortsFile, rules); err != nil {
 			writeJSON(w, http.StatusInternalServerError, map[string]any{"ok": false, "error": err.Error()})
 			return
 		}

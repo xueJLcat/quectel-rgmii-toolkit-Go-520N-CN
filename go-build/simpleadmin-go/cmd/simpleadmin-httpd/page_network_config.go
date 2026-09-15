@@ -2,6 +2,7 @@
 package main
 
 import (
+	"bytes"
 	"errors"
 	"fmt"
 	"log"
@@ -18,6 +19,31 @@ import (
 // macBindMu 保护静态绑定的"读-算-写"整体互斥(固件查询、槽位分配、固件写入、
 // 状态文件写入),防止并发请求竞争同一槽位;开机补齐与处理器共用同一把锁。
 var macBindMu sync.Mutex
+
+// ipPassthroughDisableMu 保护"禁用 IP 透传"后台流程的在途标记:处理器立即
+// 返回响应后由后台协程分步执行配置与重启,无去重时并发/重复提交(前端重试、
+// 双击、多标签)会派生多个协程重复下发命令并广播互相矛盾的结果事件。
+var (
+	ipPassthroughDisableMu       sync.Mutex
+	ipPassthroughDisableInFlight bool
+)
+
+// beginIPPassthroughDisable 尝试占用"禁用 IP 透传"流程,已在途时返回 false。
+func beginIPPassthroughDisable() bool {
+	ipPassthroughDisableMu.Lock()
+	defer ipPassthroughDisableMu.Unlock()
+	if ipPassthroughDisableInFlight {
+		return false
+	}
+	ipPassthroughDisableInFlight = true
+	return true
+}
+
+func endIPPassthroughDisable() {
+	ipPassthroughDisableMu.Lock()
+	ipPassthroughDisableInFlight = false
+	ipPassthroughDisableMu.Unlock()
+}
 
 // handleNetworkConfigData 处理网络设置页 /api/network_config_data 的各动作。
 //
@@ -49,6 +75,12 @@ func (s *simpleAdminServer) handleNetworkConfigData(w http.ResponseWriter, r *ht
 			configCommands := []string{
 				`AT+QMAP="MPDN_RULE",0`,
 				`AT+QMAPWAC=1`,
+			}
+			// 在途去重:流程结束(成功重启前进程消亡,或配置失败提前终止)
+			// 之前,重复提交直接按"进行中"响应,不再派生第二个后台协程。
+			if !beginIPPassthroughDisable() {
+				writeJSON(w, http.StatusOK, settingsRebootNoticeResponse("禁用 IP 透传流程已在进行中，请等待设备重启。", startDelay))
+				return
 			}
 			writeJSON(w, http.StatusOK, settingsRebootNoticeResponse("后台将开始禁用 IP 透传并重启设备。", startDelay))
 			s.runDelayedIPPassthroughDisable(configCommands, `AT+CFUN=1,1`, startDelay, stepDelay)
@@ -99,7 +131,7 @@ func (s *simpleAdminServer) handleNetworkConfigData(w http.ResponseWriter, r *ht
 		command := `AT+QMAP="DMZ",0`
 		if enabled {
 			ip := cleanIP(requestValue(r, "ip"))
-			if ip == "" {
+			if ip == "" || !isUnicastIPv4(ip) {
 				writeJSON(w, http.StatusBadRequest, map[string]any{"ok": false, "error": "invalid dmz ip"})
 				return
 			}
@@ -112,6 +144,14 @@ func (s *simpleAdminServer) handleNetworkConfigData(w http.ResponseWriter, r *ht
 		end := cleanIP(requestValue(r, "end"))
 		gw := cleanIP(requestValue(r, "gateway"))
 		if start == "" || end == "" || gw == "" {
+			writeJSON(w, http.StatusBadRequest, map[string]any{"ok": false, "error": "invalid lan ip"})
+			return
+		}
+		// 语义校验:三个地址必须是单播 IPv4 且池起点不大于终点。旧实现只做
+		// 点分四段格式校验,start>end、0.0.0.0、组播/广播地址会原样写入固件;
+		// 固件一旦接受,DHCP 客户端拿不到正确地址,管理员可能被断在管理界面
+		// 之外,只能物理/AT 复位。
+		if !isUnicastIPv4(start) || !isUnicastIPv4(end) || !isUnicastIPv4(gw) || !lanIPRangeOrdered(start, end) {
 			writeJSON(w, http.StatusBadRequest, map[string]any{"ok": false, "error": "invalid lan ip"})
 			return
 		}
@@ -129,7 +169,12 @@ func (s *simpleAdminServer) handleNetworkConfigData(w http.ResponseWriter, r *ht
 	case "mac_bind_set":
 		mac := normalizeMACAddress(requestValue(r, "mac"))
 		ip := cleanIP(requestValue(r, "ip"))
-		if mac == "" || ip == "" {
+		// 与 dmz/lanip 同口径的语义校验:cleanIP 只做点分四段+每段 ≤255,
+		// 前导零形态(192.168.010.010)会被固件回读时的 net.ParseIP 拒绝,
+		// 绑定在列表里不可见、删除走幂等路径清状态后固件侧永久残留僵尸租约;
+		// 字符串比较的冲突检测也会被前导零绕过(同 IP 两种写法不判冲突),
+		// 0.0.0.0/组播/广播写入 dhcp_hosts 产生垃圾条目。
+		if mac == "" || !isUnicastIPv4(ip) {
 			writeJSON(w, http.StatusBadRequest, map[string]any{"ok": false, "error": "invalid mac bind"})
 			return
 		}
@@ -158,11 +203,19 @@ func (s *simpleAdminServer) handleNetworkConfigData(w http.ResponseWriter, r *ht
 			writeJSON(w, http.StatusOK, map[string]any{"ok": false, "error": "static bind failed", "response": resp})
 			return
 		}
-		// 状态文件供开机补齐用,写失败不阻断本次设置。
-		if entries, err := readMacBindState(); err != nil {
+		// 状态文件供开机补齐用,持久化失败必须如实报错(与 mac_bind_del
+		// 已修复的口径对齐):厂商状态在重启后丢失时开机补齐是唯一的恢复
+		// 机制,未进入状态文件的绑定会静默消失,而用户看到的是"保存成功"。
+		entries, err := readMacBindState()
+		if err != nil {
 			log.Printf("读取静态绑定状态失败: %v", err)
-		} else if err := writeMacBindState(upsertMacBindState(entries, mac, ip)); err != nil {
+			writeJSON(w, http.StatusOK, map[string]any{"ok": false, "error": "固件已写入,但状态持久化失败,请重试保存"})
+			return
+		}
+		if err := writeMacBindState(upsertMacBindState(entries, mac, ip)); err != nil {
 			log.Printf("保存静态绑定状态失败: %v", err)
+			writeJSON(w, http.StatusOK, map[string]any{"ok": false, "error": "固件已写入,但状态持久化失败,请重试保存"})
+			return
 		}
 		// 固件只写 /etc/data/dhcp_hosts 不重载 dnsmasq,静态租约需 SIGHUP 生效;
 		// 固件不自动重载,重载失败时本次设置实际未生效,必须如实报错。
@@ -253,10 +306,15 @@ func (s *simpleAdminServer) handleNetworkConfigData(w http.ResponseWriter, r *ht
 		writeJSON(w, http.StatusOK, map[string]any{"ok": true, "enabled": state.Enabled, "servers": state.Servers})
 	case "dns_upstream_set":
 		// 保存会重启设备 dnsmasq(约 1 秒),前端已有确认框。
+		// "应用配置→写状态文件"整体持有 dnsUpstreamMu(见其注释):锁只盖
+		// apply 时并发保存交错会让状态文件与实际生效配置背离,开机自愈再按
+		// 陈旧状态静默回滚用户最后一次保存。
+		dnsUpstreamMu.Lock()
+		defer dnsUpstreamMu.Unlock()
 		enabled := boolQuery(r, "enabled", false)
 		if !enabled {
 			if !s.cfg.mockMode {
-				if err := applyDNSUpstream(false, nil); err != nil {
+				if err := applyDNSUpstreamLocked(false, nil); err != nil {
 					writeJSON(w, http.StatusOK, map[string]any{"ok": false, "error": "应用上游 DNS 失败: " + err.Error()})
 					return
 				}
@@ -276,7 +334,7 @@ func (s *simpleAdminServer) handleNetworkConfigData(w http.ResponseWriter, r *ht
 			return
 		}
 		if !s.cfg.mockMode {
-			if err := applyDNSUpstream(true, servers); err != nil {
+			if err := applyDNSUpstreamLocked(true, servers); err != nil {
 				writeJSON(w, http.StatusOK, map[string]any{"ok": false, "error": "应用上游 DNS 失败: " + err.Error()})
 				return
 			}
@@ -310,6 +368,9 @@ func (s *simpleAdminServer) handleNetworkConfigData(w http.ResponseWriter, r *ht
 // 所以不复用整体判定。
 func (s *simpleAdminServer) runDelayedIPPassthroughDisable(configCommands []string, rebootCommand string, startDelay, stepDelay time.Duration) {
 	go func() {
+		// 流程终止(配置失败未重启,或重启命令已下发)后释放在途标记:
+		// 失败场景用户可立即重试;成功场景设备随即重启,标记随进程消亡。
+		defer endIPPassthroughDisable()
 		if startDelay > 0 {
 			time.Sleep(startDelay)
 		}
@@ -375,6 +436,13 @@ func parseNetworkConfigStatusAT(raw string) map[string]any {
 			}
 		case isQMAPRecord(line, "DMZ"):
 			parts := csvFields(strings.TrimPrefix(line, "+QMAP:"))
+			// 固件按地址族各回一行("DMZ",<mode>,4 与 "DMZ",<mode>,6)。
+			// 本工具只管理 IPv4 DMZ(写命令 AT+QMAP="DMZ",1,4,<ip>),
+			// 不过滤地址族时恒为禁用的 IPv6 行会覆盖 IPv4 的启用状态,
+			// 前端据此永远显示 DMZ"未启用"。无地址族字段的旧形态按 IPv4 处理。
+			if len(parts) > 2 && parts[2] != "4" {
+				continue
+			}
 			if len(parts) > 1 {
 				out["dmzMode"] = parts[1]
 			}
@@ -404,6 +472,35 @@ func cleanIP(v string) string {
 		}
 	}
 	return v
+}
+
+// isUnicastIPv4 判定字符串是否为可用作 LAN 配置目标的单播 IPv4 地址:
+// net.ParseIP 严格解析(拒绝前导零等非规范形态),并排除未指定(0.0.0.0)、
+// 回环、组播、广播与链路本地(169.254/16)地址。
+func isUnicastIPv4(v string) bool {
+	ip := net.ParseIP(v)
+	if ip == nil {
+		return false
+	}
+	ip4 := ip.To4()
+	if ip4 == nil {
+		return false
+	}
+	if ip4.IsUnspecified() || ip4.IsLoopback() || ip4.IsMulticast() || ip4.IsLinkLocalUnicast() {
+		return false
+	}
+	return !ip4.Equal(net.IPv4bcast)
+}
+
+// lanIPRangeOrdered 判定 DHCP 池起点不大于终点(按 IPv4 数值比较)。
+// 调用方须先经 isUnicastIPv4 校验,解析失败按非法处理。
+func lanIPRangeOrdered(start, end string) bool {
+	s := net.ParseIP(start).To4()
+	e := net.ParseIP(end).To4()
+	if s == nil || e == nil {
+		return false
+	}
+	return bytes.Compare(s, e) <= 0
 }
 func lastIPPart(v string) string {
 	parts := strings.Split(v, ".")
@@ -576,6 +673,14 @@ func removeMacBindState(entries []macBindEntry, mac string) []macBindEntry {
 	return out
 }
 
+// macBindStateEntryValid 复验状态文件条目是否与 HTTP 保存路径同等合法
+// (MAC 可归一化 + IP 为单播 IPv4),供开机补齐使用,抽为纯函数便于测试。
+// 状态文件可被手工编辑污染,未复验的条目拼进 AT 命令即构成命令注入
+// (见 reconcileMacBindAttempt 的说明)。
+func macBindStateEntryValid(entry macBindEntry) bool {
+	return normalizeMACAddress(entry.MAC) != "" && isUnicastIPv4(entry.IP)
+}
+
 // missingMacBindEntries 计算状态里有、固件侧 live 里缺失的条目(按 MAC
 // 大小写不敏感比较),供开机补齐使用。
 func missingMacBindEntries(entries []macBindEntry, live []macBindLive) []macBindEntry {
@@ -640,6 +745,16 @@ func (s *simpleAdminServer) reconcileMacBindAttempt() bool {
 		return false
 	}
 	for _, entry := range missing {
+		// 状态文件可能损坏/被手工编辑污染(本机 console 页提供 root shell):
+		// 补齐路径必须与 HTTP 保存路径同等校验强度(与
+		// reconcileDNSUpstreamAtStartup 的复验策略对齐)。MAC/IP 未复验直接
+		// 拼进 AT 命令时,JSON 字符串里的 `";+CFUN=1,1;"` 会被模块当复合
+		// 命令执行(sanitizeATCommand 不剥分号),开机补齐变成任意 AT 命令
+		// 注入入口(重启循环/恢复出厂)。非法条目记日志跳过。
+		if !macBindStateEntryValid(entry) {
+			log.Printf("开机补齐静态绑定:状态条目非法(MAC=%q IP=%q),跳过", entry.MAC, entry.IP)
+			continue
+		}
 		// 与处理器保持同一冲突策略:该 IP 已被其他 MAC 占用则跳过,
 		// 防止开机后产生重复租约。
 		if macBindIPConflict(live, entry.MAC, entry.IP) {

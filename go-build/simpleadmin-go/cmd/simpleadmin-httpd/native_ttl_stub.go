@@ -8,7 +8,12 @@ import (
 	"os"
 	"strconv"
 	"strings"
+	"sync"
 )
+
+// nativeTTLMu 与 Linux 实现同一声明(每个平台各编译一份):保护
+// setNativeTTLWithStatus"应用→持久化"事务的整体互斥。
+var nativeTTLMu sync.Mutex
 
 func runTTLCommand(args []string) {
 	if len(args) == 0 {
@@ -23,10 +28,17 @@ func runTTLCommand(args []string) {
 			fmt.Println(err)
 			os.Exit(1)
 		}
-		lines, _ := applyNativeTTL(value, false)
+		lines, applied := applyNativeTTL(value, false)
 		printLines(lines)
+		if !applied {
+			os.Exit(1)
+		}
 	case "off", "stop":
-		printLines(setNativeTTL(0))
+		lines, ok := setNativeTTLWithStatus(0)
+		printLines(lines)
+		if !ok {
+			os.Exit(1)
+		}
 	case "status":
 		value, enabled := currentTTLValue()
 		fmt.Printf("enabled=%t ttl=%d\n", enabled, value)
@@ -52,6 +64,8 @@ func setNativeTTL(value int) []string {
 // setNativeTTLWithStatus 与 setNativeTTL 相同,但额外返回规则是否成功应用
 // 并持久化,供 HTTP 接口如实上报成败。
 func setNativeTTLWithStatus(value int) ([]string, bool) {
+	nativeTTLMu.Lock()
+	defer nativeTTLMu.Unlock()
 	logs, applied := applyNativeTTL(value, true)
 	if !applied {
 		return logs, false

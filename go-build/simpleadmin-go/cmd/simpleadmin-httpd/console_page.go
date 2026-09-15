@@ -294,17 +294,27 @@ body{display:flex;flex-direction:column;min-height:0}
   connect();
 
   document.addEventListener('keydown',function(e){
-    if(document.activeElement!==term) term.focus();
+    // 焦点在按钮/输入控件上时不劫持按键:键盘用户 Tab 到「重新连接」等
+    // 控件后,Enter/Space 必须触发控件本身而不是被当成终端输入。
+    var ae=document.activeElement;
+    if(ae && ae!==term && /^(BUTTON|INPUT|TEXTAREA|SELECT|A)$/.test(ae.tagName)) return;
+    if(ae!==term) term.focus();
     // Ctrl+Shift+C 交还给浏览器做复制,不当作 ^C 发送给终端。
     if(e.ctrlKey && e.shiftKey && (e.key==='c' || e.key==='C')) return;
+    // Ctrl+V / Ctrl+Shift+V 交还给浏览器触发原生粘贴(粘贴文本经 paste
+    // 事件写入终端),不得映射成控制码并 preventDefault,否则粘贴通道被切断。
+    if(e.ctrlKey && (e.key==='v' || e.key==='V')) return;
     var v=null;
     if(e.ctrlKey){
       var k=e.key.toLowerCase();
-      if(k==='c') v='\x03';
-      else if(k==='d') v='\x04';
-      else if(k==='l') v='\x0c';
-      else if(k==='z') v='\x1a';
-    }else if(e.key==='Enter') v='\r';
+      // Ctrl+字母统一映射为控制码 ^A-^Z(charCode-96):readline/vi 的
+      // Ctrl+A/E/R/W/K/[ 等快捷键不再被吞掉(旧实现只放行 C/D/L/Z)。
+      if(k>='a' && k<='z') v=String.fromCharCode(k.charCodeAt(0)-96);
+      else if(e.key==='[') v='\x1b';
+      else if(e.key===' ') v='\x00';
+    }
+    else if(e.altKey && e.key.length===1) v='\x1b'+e.key; // Meta 组合:ESC 前缀
+    else if(e.key==='Enter') v='\r';
     else if(e.key==='Backspace') v='\x7f';
     else if(e.key==='Tab') v='\t';
     else if(e.key==='ArrowUp') v='\x1b[A';

@@ -92,8 +92,13 @@ func trimOutputBeforeEchoMarker(out, marker string) string {
 
 // findEchoMarker locates the echoed command inside raw device output. The
 // match is case-insensitive and skips carriage returns, so payloads echoed
-// with \r\n endings still match. Returns the raw index of the first marker
-// byte, or -1 when absent.
+// with \r\n endings still match. The match must start at a line boundary
+// (buffer start or right after a newline): the module echoes input line by
+// line, and an unanchored substring match would mislocate short commands
+// (AT/ATI) inside longer words of stale data (e.g. "ST"AT"US"), truncating
+// the buffer mid-word and treating stale bytes as this transaction's
+// response. Returns the raw index of the first marker byte, or -1 when
+// absent.
 func findEchoMarker(buf []byte, marker string) int {
 	marker = strings.ToUpper(strings.ReplaceAll(marker, "\r", ""))
 	if marker == "" {
@@ -110,11 +115,19 @@ func findEchoMarker(buf []byte, marker string) int {
 		normalized = append(normalized, upperASCIIByte(c))
 		rawIndexOf = append(rawIndexOf, i)
 	}
-	pos := strings.Index(string(normalized), marker)
-	if pos < 0 {
-		return -1
+	norm := string(normalized)
+	for search := 0; search+len(marker) <= len(norm); {
+		pos := strings.Index(norm[search:], marker)
+		if pos < 0 {
+			return -1
+		}
+		pos += search
+		if pos == 0 || norm[pos-1] == '\n' {
+			return rawIndexOf[pos]
+		}
+		search = pos + 1
 	}
-	return rawIndexOf[pos]
+	return -1
 }
 
 func upperASCIIByte(c byte) byte {

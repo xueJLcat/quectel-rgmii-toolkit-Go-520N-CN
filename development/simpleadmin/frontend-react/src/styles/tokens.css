@@ -1,0 +1,146 @@
+/* SimpleAdmin React 设计令牌:--sa-* 双主题(亮色默认 / html[data-bs-theme="dark"] 覆盖)。
+   组件一律经 globals.css 的 @theme inline 映射或 var(--sa-*) 取色;禁止硬编码色值。
+   域色体系:monitor/network/security/comm/tools/system 六域,贯穿导航图标、面板渐变条、图表系列色与光晕。 */
+:root {
+  --sa-sidebar-width: 256px;
+  --sa-sidebar-collapsed-width: 76px;
+  --sa-font: "Poppins", "Microsoft YaHei", "PingFang SC", Arial, sans-serif;
+  --sa-font-mono: "SFMono-Regular", Consolas, "Liberation Mono", Menlo, monospace;
+
+  --sa-bg: #f5f7fb;
+  --sa-surface: #ffffff;
+  --sa-surface-2: #f7f8fa;
+  --sa-surface-3: #eef1f5;
+  --sa-bg-soft: #f3f5f8;
+  --sa-text: #111827;
+  --sa-text-soft: #374151;
+  --sa-muted: #6b7280;
+  --sa-border: #d8dee8;
+  --sa-border-strong: #b9c3d2;
+
+  --sa-accent: #1f6feb;
+  --sa-accent-soft: #eef5ff;
+  --sa-accent-2: #7c3aed;
+  --sa-accent-3: #0e7490;
+
+  --sa-success: #0f9d58;
+  --sa-warning: #d97706;
+  --sa-danger: #e11d48;
+  --sa-info: #0ea5e9;
+  --sa-success-soft: #ecfdf5;
+  --sa-warning-soft: #fffbeb;
+  --sa-danger-soft: #fff1f2;
+  --sa-info-soft: #f0f9ff;
+
+  --sa-domain-monitor: #3b82f6;
+  --sa-domain-monitor-soft: rgba(59, 130, 246, 0.1);
+  --sa-grad-monitor: linear-gradient(135deg, #3b82f6 0%, #06b6d4 100%);
+  --sa-domain-network: #10b981;
+  --sa-domain-network-soft: rgba(16, 185, 129, 0.1);
+  --sa-grad-network: linear-gradient(135deg, #10b981 0%, #14b8a6 100%);
+  --sa-domain-security: #f59e0b;
+  --sa-domain-security-soft: rgba(245, 158, 11, 0.1);
+  --sa-grad-security: linear-gradient(135deg, #f59e0b 0%, #f97316 100%);
+  --sa-domain-comm: #8b5cf6;
+  --sa-domain-comm-soft: rgba(139, 92, 246, 0.1);
+  --sa-grad-comm: linear-gradient(135deg, #8b5cf6 0%, #d946ef 100%);
+  --sa-domain-tools: #06b6d4;
+  --sa-domain-tools-soft: rgba(6, 182, 212, 0.1);
+  --sa-grad-tools: linear-gradient(135deg, #06b6d4 0%, #0ea5e9 100%);
+  --sa-domain-system: #f43f5e;
+  --sa-domain-system-soft: rgba(244, 63, 94, 0.1);
+  --sa-grad-system: linear-gradient(135deg, #f43f5e 0%, #ec4899 100%);
+
+  --sa-gradient: linear-gradient(135deg, #1f6feb 0%, #7c3aed 100%);
+  --sa-glow-accent: 0 4px 14px -2px rgba(31, 111, 235, 0.35);
+  --sa-glow-danger: 0 4px 14px -2px rgba(225, 29, 72, 0.3);
+
+  --sa-control-bg: #ffffff;
+  --sa-control-text: #111827;
+  --sa-focus-ring: rgba(31, 111, 235, 0.3);
+  --sa-overlay: rgba(255, 255, 255, 0.74);
+  --sa-backdrop: rgba(17, 24, 39, 0.5);
+
+  --sa-radius-sm: 8px;
+  --sa-radius: 12px;
+  --sa-radius-lg: 16px;
+  --sa-radius-pill: 999px;
+
+  --sa-shadow-sm: 0 1px 2px rgba(16, 24, 40, 0.06);
+  --sa-shadow: 0 1px 3px rgba(16, 24, 40, 0.1), 0 1px 2px rgba(16, 24, 40, 0.06);
+  --sa-shadow-md: 0 4px 8px -2px rgba(16, 24, 40, 0.1), 0 2px 4px -2px rgba(16, 24, 40, 0.06);
+  --sa-shadow-lg: 0 12px 16px -4px rgba(16, 24, 40, 0.12), 0 4px 6px -2px rgba(16, 24, 40, 0.05);
+
+  --sa-text-xs: 12px;
+  --sa-text-sm: 13px;
+  --sa-text-base: 14px;
+  --sa-text-lg: 16px;
+  --sa-text-xl: 20px;
+  --sa-text-2xl: 26px;
+
+  --sa-ease: cubic-bezier(0.22, 0.7, 0.28, 1);
+  --sa-dur-fast: 150ms;
+  --sa-dur: 220ms;
+  --sa-dur-slow: 360ms;
+}
+
+html[data-bs-theme="dark"] {
+  --sa-bg: #0d1320;
+  --sa-surface: #151c2c;
+  --sa-surface-2: #1c2438;
+  --sa-surface-3: #243049;
+  --sa-bg-soft: #10151d;
+  --sa-text: #f4f7fb;
+  --sa-text-soft: #d8dee9;
+  --sa-muted: #aeb8c8;
+  --sa-border: #2b3650;
+  --sa-border-strong: #48566d;
+
+  --sa-accent: #7db1ff;
+  --sa-accent-soft: #22334d;
+  --sa-accent-2: #b18cff;
+  --sa-accent-3: #4dd0e1;
+
+  --sa-success: #34d399;
+  --sa-warning: #fbbf24;
+  --sa-danger: #fb7185;
+  --sa-info: #38bdf8;
+  --sa-success-soft: rgba(52, 211, 153, 0.12);
+  --sa-warning-soft: rgba(251, 191, 36, 0.12);
+  --sa-danger-soft: rgba(251, 113, 133, 0.12);
+  --sa-info-soft: rgba(56, 189, 248, 0.12);
+
+  --sa-domain-monitor: #60a5fa;
+  --sa-domain-monitor-soft: rgba(96, 165, 250, 0.14);
+  --sa-grad-monitor: linear-gradient(135deg, #3b82f6 0%, #22d3ee 100%);
+  --sa-domain-network: #34d399;
+  --sa-domain-network-soft: rgba(52, 211, 153, 0.14);
+  --sa-grad-network: linear-gradient(135deg, #10b981 0%, #2dd4bf 100%);
+  --sa-domain-security: #fbbf24;
+  --sa-domain-security-soft: rgba(251, 191, 36, 0.14);
+  --sa-grad-security: linear-gradient(135deg, #f59e0b 0%, #fb923c 100%);
+  --sa-domain-comm: #a78bfa;
+  --sa-domain-comm-soft: rgba(167, 139, 250, 0.14);
+  --sa-grad-comm: linear-gradient(135deg, #8b5cf6 0%, #e879f9 100%);
+  --sa-domain-tools: #22d3ee;
+  --sa-domain-tools-soft: rgba(34, 211, 238, 0.14);
+  --sa-grad-tools: linear-gradient(135deg, #06b6d4 0%, #38bdf8 100%);
+  --sa-domain-system: #fb7185;
+  --sa-domain-system-soft: rgba(251, 113, 133, 0.14);
+  --sa-grad-system: linear-gradient(135deg, #f43f5e 0%, #f472b6 100%);
+
+  --sa-gradient: linear-gradient(135deg, #5b96f5 0%, #9d6ef0 100%);
+  --sa-glow-accent: 0 4px 16px -2px rgba(125, 177, 255, 0.35);
+  --sa-glow-danger: 0 4px 16px -2px rgba(251, 113, 133, 0.3);
+
+  --sa-control-bg: #151d2a;
+  --sa-control-text: #f4f7fb;
+  --sa-focus-ring: rgba(125, 177, 255, 0.35);
+  --sa-overlay: rgba(13, 19, 32, 0.76);
+  --sa-backdrop: rgba(0, 0, 0, 0.6);
+
+  --sa-shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.4);
+  --sa-shadow: 0 1px 3px rgba(0, 0, 0, 0.5), 0 1px 2px rgba(0, 0, 0, 0.4);
+  --sa-shadow-md: 0 4px 8px -2px rgba(0, 0, 0, 0.5);
+  --sa-shadow-lg: 0 12px 16px -4px rgba(0, 0, 0, 0.55);
+}
